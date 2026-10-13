@@ -73,13 +73,20 @@ ad-libs** every ~25 s, and **file mode** to process recordings.
 6. Tick **Monitor** if you want to hear yourself in your headphones.
 
 ### For the AI features
-Get an API key from https://console.anthropic.com and set it once (PowerShell):
+**Option A: OpenRouter (Claude Haiku 5.5, fast and cheap).** Create a key at https://openrouter.ai/keys and set it once (PowerShell):
 
 ```powershell
-setx ANTHROPIC_API_KEY "sk-ant-..."
+setx OPENROUTER_API_KEY "sk-or-..."
 ```
 
-Then restart Bombovoice. The first time you use AI or Hybrid mode, the Whisper speech model downloads (~150 MB).
+When `OPENROUTER_API_KEY` is set, Bombovoice uses OpenRouter automatically, with model
+**`anthropic/claude-haiku-5.5`**. Haiku is the quickest option, which matters because you're waiting to hear your line.
+
+**Option B: Anthropic API directly.** Set `ANTHROPIC_API_KEY` from https://console.anthropic.com instead. The default model there is `claude-opus-5-5`.
+
+To force one or the other, use the **"via"** dropdown in the GUI, `--provider openrouter|anthropic` on the
+command line, or `"ai_provider"` in the settings file. Restart Bombovoice after setting a key. The first
+time you use AI or Hybrid mode, the Whisper speech model downloads (~150 MB).
 
 ### macOS / Linux
 
@@ -101,6 +108,7 @@ bombovoice live                              # terminal mode with hotkeys + type
 bombovoice live -m ai --style dancehall -i 3 --spicy --monitor
 bombovoice translate "I think this game is really crazy"            # offline
 bombovoice translate --ai --plan "I can't believe we won"           # Claude + show the delivery plan
+bombovoice translate --ai --provider openrouter "Let's go team"     # force OpenRouter (Haiku 5.5)
 bombovoice say "Thank you for watching my stream" --riddim -o outro.wav
 bombovoice file my_clip.wav my_clip_jamaican.wav                    # live-voice FX on a recording
 bombovoice file -m ai my_clip.wav my_clip_patois.wav                # full AI re-performance
@@ -121,7 +129,9 @@ Settings (including hotkeys, voice, TTS voice and model) are saved to
 - **Lowest latency for live voice:** set `"quality": "fast"` in settings.
 - **TTS voice:** default is `en-NG-AbeoNeural` (Microsoft Edge neural voice, online). Try others with
   `--tts-voice en-KE-ChilembaNeural` etc. Offline it uses your PC's built-in voices via `--tts-backend pyttsx3`.
-- **Faster AI replies:** `--model claude-haiku-5-5` trades some comedy writing for speed.
+- **AI model:** OpenRouter defaults to `anthropic/claude-haiku-5.5`. To try a bigger Claude model, pass its
+  slug from https://openrouter.ai/models with `--model <slug>` (or set `"openrouter_model"` in settings). Expect
+  sharper comedy writing but slower replies.
 
 ---
 
@@ -132,14 +142,14 @@ mic ─► VoiceChain ───────────────────�
        (HPF → Lilt Engine → phase-vocoder pitch  │
         + formant shift → EQ → rasp → dub echo   ├─► Mixer ─► limiter ─► virtual cable ─► Discord/game
         → limiter)                               │   (+ riddim w/ ducking, soundboard, TTS, ad-libs)
-mic ─► VAD ─► Whisper ─► Claude director ─► TTS performer (per-segment rate/pitch/volume + contours) ┘
+mic ─► VAD ─► Whisper ─► Claude (Haiku 5.5 via OpenRouter) ─► TTS performer (per-segment rate/pitch/volume + contours) ┘
 ```
 
 | File | Role |
 |---|---|
 | `bombovoice/dsp.py` | Phase-vocoder pitch/formant shifter, delay-line shifter, **Lilt Engine**, dub echo, EQ, limiter |
 | `bombovoice/patois.py` | Offline English → Patois translator plus prosody segmentation |
-| `bombovoice/ai.py` | Claude director (structured output: Patois text plus delivery plan) |
+| `bombovoice/ai.py` | Claude director via OpenRouter or the Anthropic API (structured output: Patois text plus delivery plan) |
 | `bombovoice/tts.py` | Edge / pyttsx3 TTS that performs the delivery plan |
 | `bombovoice/stt.py` | Voice activity detection and faster-whisper transcription |
 | `bombovoice/synth.py` | Air horn, siren, bass drop, rewind, laser, one-drop riddim generator |

@@ -138,8 +138,13 @@ class App:
         ttk.Checkbutton(ac, text="Spicy (bomboclaat!)", variable=self.spicy_var,
                         command=lambda: self._set(spicy=self.spicy_var.get())).grid(row=2, column=0, columnspan=2, sticky="w", padx=6)
         self.ai_var = tk.BooleanVar(value=self.s.use_ai)
-        ttk.Checkbutton(ac, text="Use Claude AI director", variable=self.ai_var,
+        ttk.Checkbutton(ac, text="Use Claude AI director  via", variable=self.ai_var,
                         command=lambda: self._set(use_ai=self.ai_var.get())).grid(row=3, column=0, columnspan=2, sticky="w", padx=6)
+        self.provider_var = tk.StringVar(value=self.s.ai_provider)
+        pv = ttk.Combobox(ac, textvariable=self.provider_var, state="readonly", width=14,
+                          values=["auto", "openrouter", "anthropic"])
+        pv.grid(row=3, column=2, sticky="w", padx=6)
+        pv.bind("<<ComboboxSelected>>", lambda e: self._set(ai_provider=self.provider_var.get()))
         self.auto_var = tk.BooleanVar(value=self.s.auto_adlib)
         ttk.Checkbutton(ac, text="Random ad-libs every ~25s", variable=self.auto_var,
                         command=lambda: self._set(auto_adlib=self.auto_var.get())).grid(row=4, column=0, columnspan=2, sticky="w", padx=6)

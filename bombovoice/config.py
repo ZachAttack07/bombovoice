@@ -66,7 +66,9 @@ class Settings:
 
     # AI
     use_ai: bool = True
-    model: str = "claude-opus-5-5"
+    ai_provider: str = "auto"  # auto (OpenRouter if OPENROUTER_API_KEY is set), openrouter, anthropic
+    openrouter_model: str = "anthropic/claude-haiku-5.5"
+    model: str = "claude-opus-5-5"  # used with the Anthropic API directly
     effort: str = "low"
     whisper_model: str = "base.en"
     hype_man_chance: float = 0.5  # hybrid mode: chance the hype man reacts to a sentence

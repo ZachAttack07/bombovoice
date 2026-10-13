@@ -18,7 +18,7 @@ import numpy as np
 from . import synth
 from .config import MODES, Settings
 from .dsp import VoiceChain, db_to_gain
-from .patois import AD_LIBS, INTENSITY_NAMES, SPICY_AD_LIBS, PatoisTranslator, Translation
+from .patois import AD_LIBS, INTENSITY_NAMES, SPICY_AD_LIBS, Translation
 
 log = logging.getLogger(__name__)
 
@@ -156,15 +156,13 @@ class Engine:
         self._threads.append(worker)
 
     def _load_ai(self):
-        from .ai import make_translator
+        from .ai import describe, translator_from_settings
         from .stt import UtteranceDetector
         from .tts import make_tts
 
         self._detector = UtteranceDetector(self.sr)
-        self._translator = make_translator(self.s.use_ai, model=self.s.model, intensity=self.s.intensity,
-                                           spicy=self.s.spicy, style=self.s.style, effort=self.s.effort)
-        brain = "Claude AI director" if not isinstance(self._translator, PatoisTranslator) else "offline Patois rules"
-        self.status(f"Translator: {brain}")
+        self._translator = translator_from_settings(self.s)
+        self.status(f"Translator: {describe(self._translator)}")
         try:
             self._tts = make_tts(self.s.tts_backend, self.s.tts_voice, self.sr)
             self.status(f"Voice synth: {self._tts.name}")
@@ -176,12 +174,10 @@ class Engine:
         self._prerender_adlibs()
 
     def _rebuild_translator(self):
-        from .ai import make_translator
+        from .ai import describe, translator_from_settings
 
-        self._translator = make_translator(self.s.use_ai, model=self.s.model, intensity=self.s.intensity,
-                                           spicy=self.s.spicy, style=self.s.style, effort=self.s.effort)
-        ai = not isinstance(self._translator, PatoisTranslator)
-        self.status(f"Translator: {'Claude AI director' if ai else 'offline Patois rules'}")
+        self._translator = translator_from_settings(self.s)
+        self.status(f"Translator: {describe(self._translator)}")
 
     def _ensure_transcriber(self) -> bool:
         with self._stt_lock:
@@ -498,7 +494,8 @@ class Engine:
             self.mixer.loop_gain = float(self.s.riddim_volume)
         if "spicy" in changes and self.s.spicy and self._tts is not None:
             threading.Thread(target=self._prerender_adlibs, daemon=True).start()
-        if "use_ai" in changes and self._ai_ready.is_set():
+        rebuild = {"use_ai", "ai_provider", "openrouter_model", "model"}
+        if rebuild & changes.keys() and self._ai_ready.is_set():
             threading.Thread(target=self._rebuild_translator, daemon=True).start()
         if changes.get("mode") in ("ai", "hybrid"):
             threading.Thread(target=self._ensure_transcriber, daemon=True).start()

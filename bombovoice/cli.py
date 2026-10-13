@@ -34,7 +34,16 @@ BANNER = r"""
 
 
 def _apply_common(s: Settings, a: argparse.Namespace):
-    for key in ("intensity", "style", "model", "mode", "input_device", "output_device", "lilt", "base_pitch",
+    if getattr(a, "provider", None):
+        s.ai_provider = a.provider
+    if getattr(a, "model", None):
+        from .ai import resolve_provider
+
+        if resolve_provider(s.ai_provider) == "openrouter":
+            s.openrouter_model = a.model
+        else:
+            s.model = a.model
+    for key in ("intensity", "style", "mode", "input_device", "output_device", "lilt", "base_pitch",
                 "formant", "tts_backend", "tts_voice", "whisper_model", "quality"):
         val = getattr(a, key, None)
         if val is not None:
@@ -52,9 +61,9 @@ def _apply_common(s: Settings, a: argparse.Namespace):
 
 
 def _translator(s: Settings, ai: bool):
-    from .ai import make_translator
+    from .ai import translator_from_settings
 
-    return make_translator(ai, model=s.model, intensity=s.intensity, spicy=s.spicy, style=s.style, effort=s.effort)
+    return translator_from_settings(s, use_ai=ai)
 
 
 def cmd_translate(a, s: Settings):
@@ -248,7 +257,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="0 " + ", ".join(f"{k}={v}" for k, v in INTENSITY_NAMES.items()))
     common.add_argument("--spicy", action="store_true", help="allow bomboclaat-grade exclamations")
     common.add_argument("--style", choices=["yaadie", "dancehall", "rasta", "auntie", "commentator"])
-    common.add_argument("--model", help="Claude model for the AI director (default claude-opus-5-5)")
+    common.add_argument("--provider", choices=["auto", "openrouter", "anthropic"],
+                        help="where to reach Claude (auto = OpenRouter if OPENROUTER_API_KEY is set)")
+    common.add_argument("--model", help="model for the AI director (OpenRouter default anthropic/claude-haiku-5.5, "
+                                        "Anthropic default claude-opus-5-5)")
     common.add_argument("--no-ai", action="store_true", help="never call Claude; offline rules only")
     common.add_argument("--tts-backend", choices=["auto", "edge", "pyttsx3"])
     common.add_argument("--tts-voice")
