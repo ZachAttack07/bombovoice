@@ -128,3 +128,139 @@ def create_linux_virtual_mic() -> str:
     for c in cmds:
         subprocess.run(c, check=True, capture_output=True)
     return "Created sink 'bombovoice' and microphone 'Bombovoice_Mic'. (Lasts until reboot; re-run to recreate.)"
+
+
+# ---------------------------------------------------------------------------
+# Robust stream opening
+# ---------------------------------------------------------------------------
+
+MIC_HELP = """\
+Bombovoice could not open your microphone.
+
+Fixes that usually work on Windows:
+  1. Settings > Privacy & security > Microphone: turn ON "Microphone access"
+     AND "Let desktop apps access your microphone".
+  2. Close other apps that may be holding the mic (Discord, OBS, games, browser tabs), or in
+     Control Panel > Sound > Recording > your mic > Properties > Advanced, untick
+     "Allow applications to take exclusive control of this device".
+  3. Make sure the mic is plugged in and enabled (Sound > Recording, right-click > Show disabled devices).
+  4. Pick your microphone explicitly in the "Microphone" list instead of "(system default)",
+     then press START again. `bombovoice devices --test` shows which entries open.
+"""
+
+OUTPUT_HELP = """\
+Bombovoice could not open the output device.
+
+  1. Check VB-Audio Virtual Cable is installed (reboot after installing).
+  2. Pick another entry for the same device in the "Send to" list (each device appears once per Windows audio system).
+  3. `bombovoice devices --test` shows which entries open.
+"""
+
+
+class AudioOpenError(RuntimeError):
+    def __init__(self, kind: str, attempts: list[str]):
+        self.kind = kind
+        self.attempts = attempts
+        details = "\n".join(f"  - {a}" for a in attempts[:6]) or "  - no usable devices found"
+        if len(attempts) > 6:
+            details += f"\n  - ...and {len(attempts) - 6} more"
+        super().__init__((MIC_HELP if kind == "input" else OUTPUT_HELP) + "\nWhat was tried:\n" + details)
+
+
+def _same_device(a: str, b: str) -> bool:
+    # MME truncates names to 31 characters, so compare on the common prefix
+    a, b = a.lower().strip(), b.lower().strip()
+    n = min(len(a), len(b), 31)
+    return n >= 6 and a[:n] == b[:n]
+
+
+def stream_candidates(kind: str, preferred: int | None) -> list[int]:
+    """Device indices to try, best first: the chosen device, then the same device on other host APIs."""
+    sd = _sd()
+    devs, apis = sd.query_devices(), sd.query_hostapis()
+    key = "max_input_channels" if kind == "input" else "max_output_channels"
+    api_order = sorted(range(len(apis)), key=lambda i: _preferred_hostapi_rank(apis[i]["name"]))
+    out: list[int] = []
+    if preferred is not None:
+        out.append(preferred)
+        name = devs[preferred]["name"]
+        for a in api_order:
+            out += [j for j in apis[a]["devices"] if devs[j][key] > 0 and _same_device(devs[j]["name"], name)]
+    else:
+        default_key = "default_input_device" if kind == "input" else "default_output_device"
+        for a in api_order:
+            d = apis[a].get(default_key, -1)
+            if d is not None and d >= 0:
+                out.append(d)
+        try:
+            d = sd.default.device[0 if kind == "input" else 1]
+            if d is not None and d >= 0:
+                out.append(int(d))
+        except Exception:
+            pass
+    seen, result = set(), []
+    for i in out:
+        if i not in seen and 0 <= i < len(devs) and devs[i][key] > 0:
+            seen.add(i)
+            result.append(i)
+    return result
+
+
+def open_stream(kind: str, preferred: int | None, samplerate: int, blocksize: int, callback):
+    """Open an input/output stream, falling back across host APIs, channel counts and latencies.
+
+    Returns (stream, device_index, description).
+    """
+    sd = _sd()
+    devs, apis = sd.query_devices(), sd.query_hostapis()
+    key = "max_input_channels" if kind == "input" else "max_output_channels"
+    cls = sd.InputStream if kind == "input" else sd.OutputStream
+    attempts: list[str] = []
+    for idx in stream_candidates(kind, preferred):
+        dev = devs[idx]
+        api = apis[dev["hostapi"]]["name"]
+        extra = None
+        if "WASAPI" in api:
+            try:  # let Windows convert the sample rate / channel count for us
+                extra = sd.WasapiSettings(auto_convert=True)
+            except TypeError:
+                extra = None
+        channels = sorted({1, min(2, int(dev[key]))})
+        last_err = None
+        for ch in channels:
+            for latency in ("low", "high"):
+                try:
+                    st = cls(device=idx, channels=ch, samplerate=samplerate, blocksize=blocksize, dtype="float32",
+                             callback=callback, latency=latency, extra_settings=extra)
+                    return st, idx, f"{dev['name']} [{api}]"
+                except Exception as exc:
+                    last_err = exc
+        attempts.append(f"{dev['name']} [{api}]: {last_err}")
+    raise AudioOpenError(kind, attempts)
+
+
+def test_devices(samplerate: int = 48000, blocksize: int = 256) -> list[tuple[str, int, str, str]]:
+    """Try to open every input and output device. Returns (kind, index, name, result)."""
+    sd = _sd()
+    devs, apis = sd.query_devices(), sd.query_hostapis()
+    results = []
+    for kind, key in (("input", "max_input_channels"), ("output", "max_output_channels")):
+        cls = sd.InputStream if kind == "input" else sd.OutputStream
+        for i, d in enumerate(devs):
+            if d[key] <= 0:
+                continue
+            name = f"{d['name']} [{apis[d['hostapi']]['name']}]"
+            extra = None
+            if "WASAPI" in apis[d["hostapi"]]["name"]:
+                try:
+                    extra = sd.WasapiSettings(auto_convert=True)
+                except TypeError:
+                    pass
+            try:
+                st = cls(device=i, channels=1, samplerate=samplerate, blocksize=blocksize, dtype="float32",
+                         extra_settings=extra)
+                st.close()
+                results.append((kind, i, name, "OK"))
+            except Exception as exc:
+                results.append((kind, i, name, f"FAILED: {exc}"))
+    return results

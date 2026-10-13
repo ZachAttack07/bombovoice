@@ -177,7 +177,15 @@ def cmd_demo(a, s: Settings):
 
 
 def cmd_devices(a, s: Settings):
-    from .devices import find_virtual_output, list_devices
+    from .devices import find_virtual_output, list_devices, test_devices
+
+    if a.test:
+        print("Trying to open every device (this is what START does)...\n")
+        for kind, idx, name, result in test_devices(s.sample_rate, s.block_size):
+            print(f"{kind:<6} {idx:>3}  {result[:60]:<60}  {name}")
+        print("\nPick an 'OK' microphone in the app's Microphone list. If every input FAILED, check")
+        print("Settings > Privacy & security > Microphone > 'Let desktop apps access your microphone'.")
+        return
 
     virt = find_virtual_output()
     print(f"{'#':>3}  {'in':>2} {'out':>3}  {'host API':<20} name")
@@ -311,6 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     d.set_defaults(fn=cmd_demo)
 
     dv = sub.add_parser("devices", help="list audio devices")
+    dv.add_argument("--test", action="store_true", help="try opening every device and report which work")
     dv.set_defaults(fn=cmd_devices)
 
     st = sub.add_parser("setup", help="virtual microphone setup instructions")

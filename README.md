@@ -114,6 +114,7 @@ bombovoice file my_clip.wav my_clip_jamaican.wav                    # live-voice
 bombovoice file -m ai my_clip.wav my_clip_patois.wav                # full AI re-performance
 bombovoice demo -o demo.wav                                         # 3 lines over the riddim
 bombovoice devices                                                  # list audio devices
+bombovoice devices --test                                           # check which devices actually open
 ```
 
 In `live` mode you can type commands: `airhorn`, `siren`, `rewind`, `riddim`, `adlib`, `echo`,
@@ -134,6 +135,18 @@ Settings (including hotkeys, voice, TTS voice and model) are saved to
   sharper comedy writing but slower replies.
 
 ---
+
+## Troubleshooting
+
+**"Could not start audio … Unanticipated host error [PaErrorCode -9999] … [MME error 1]"**
+Windows refused to open the microphone. Bombovoice already retries the same mic through WASAPI, DirectSound
+and MME, so if you still see this:
+1. **Settings > Privacy & security > Microphone**: turn on **Microphone access** *and*
+   **Let desktop apps access your microphone**. This is the usual cause.
+2. Close apps that may be holding the mic, or in *Control Panel > Sound > Recording > your mic > Properties >
+   Advanced*, untick **Allow applications to take exclusive control of this device**.
+3. Run `bombovoice devices --test` (or `.venv\Scripts\python -m bombovoice devices --test` from the repo folder).
+   It tries every device and marks which ones open with **OK**. Pick one of those in the app's Microphone list.
 
 ## How it works
 

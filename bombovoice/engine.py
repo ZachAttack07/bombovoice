@@ -270,9 +270,8 @@ class Engine:
     def start(self):
         import os
 
-        from .devices import _sd, find_device, find_virtual_output, linux_virtual_sink
+        from .devices import find_device, find_virtual_output, linux_virtual_sink, open_stream
 
-        sd = _sd()
         if not self.sounds:
             self.prepare()
         in_dev = find_device(self.s.input_device, "input")
@@ -289,7 +288,7 @@ class Engine:
         def on_input(indata, frames, time_info, status):
             if status:
                 log.debug("input status: %s", status)
-            y = self.process_input(indata[:, 0].copy())
+            y = self.process_input(indata.mean(axis=1) if indata.shape[1] > 1 else indata[:, 0].copy())
             self.out_fifo.push(y)
 
         def on_output(outdata, frames, time_info, status):
@@ -302,30 +301,38 @@ class Engine:
             m = self.monitor_fifo.pull(frames)
             outdata[:] = m.reshape(-1, 1).repeat(outdata.shape[1], axis=1)
 
-        self._streams = [
-            sd.InputStream(device=in_dev, channels=1, samplerate=self.sr, blocksize=bs, dtype="float32",
-                           callback=on_input, latency="low"),
-        ]
-        if pulse_sink:  # the ALSA pulse plugin reads this when the stream opens
-            os.environ["PULSE_SINK"] = pulse_sink
+        opened = []
         try:
-            self._streams.append(sd.OutputStream(device=out_dev, channels=1, samplerate=self.sr, blocksize=bs,
-                                                 dtype="float32", callback=on_output, latency="low"))
-        finally:
-            if pulse_sink:
-                os.environ.pop("PULSE_SINK", None)
-        if self.s.monitor:
-            mon = find_device(self.s.monitor_device, "output") if self.s.monitor_device else None
-            self._streams.append(sd.OutputStream(device=mon, channels=1, samplerate=self.sr, blocksize=bs,
-                                                 dtype="float32", callback=on_monitor, latency="low"))
-        for st in self._streams:
-            st.start()
+            st, in_dev, in_name = open_stream("input", in_dev, self.sr, bs, on_input)
+            opened.append(st)
+            if pulse_sink:  # the ALSA pulse plugin reads this when the stream opens
+                os.environ["PULSE_SINK"] = pulse_sink
+            try:
+                st, out_dev, out_name = open_stream("output", out_dev, self.sr, bs, on_output)
+            finally:
+                if pulse_sink:
+                    os.environ.pop("PULSE_SINK", None)
+            opened.append(st)
+            if self.s.monitor:
+                mon = find_device(self.s.monitor_device, "output") if self.s.monitor_device else None
+                try:
+                    st, _, _ = open_stream("output", mon, self.sr, bs, on_monitor)
+                    opened.append(st)
+                except Exception as exc:  # monitoring is optional - keep going without it
+                    self.status(f"Could not open monitor headphones ({exc.__class__.__name__}); continuing without")
+            for st in opened:
+                st.start()
+        except Exception:
+            for st in opened:
+                try:
+                    st.close()
+                except Exception:
+                    pass
+            raise
+        self._streams = opened
         self.running = True
-        names = sd.query_devices()
-        out_name = names[out_dev]["name"] if out_dev is not None else "default speakers"
         if pulse_sink:
             out_name = "Bombovoice virtual mic"
-        in_name = names[in_dev]["name"] if in_dev is not None else "default microphone"
         self.status(f"LIVE: {in_name}  ->  {out_name}   [{self.s.mode} mode, {INTENSITY_NAMES[self.s.intensity]}]")
 
     def stop(self):
