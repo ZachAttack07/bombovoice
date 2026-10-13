@@ -66,7 +66,7 @@ class Settings:
     warmth_db: float = 3.0
     rasp: float = 0.1
     echo: bool = False
-    quality: str = "natural"  # "natural" PSOLA (~40 ms), "pv" phase vocoder, "fast" delay line (~20 ms)
+    quality: str = "natural"  # "natural" PSOLA (~40 ms), "rvc" GPU AI voice, "pv" phase vocoder, "fast" delay line
     mic_gain_db: float = 0.0
 
     # AI
@@ -79,7 +79,7 @@ class Settings:
     hype_man_chance: float = 0.5  # hybrid mode: chance the hype man reacts to a sentence
 
     # text to speech
-    tts_backend: str = "auto"  # auto, edge, pyttsx3
+    tts_backend: str = "auto"  # auto, edge, pyttsx3, xtts (GPU voice cloning)
     tts_voice: str | None = None
     tts_lilt: float = 1.0
     tts_pitch: float = -1.0  # extra semitones on the TTS voice
@@ -90,6 +90,22 @@ class Settings:
     sfx_volume: float = 0.8
     auto_adlib: bool = False
     auto_adlib_seconds: float = 25.0
+
+    # GPU AI voice (RVC) - set quality to "rvc" to use it live
+    rvc_model: str | None = None  # path to a .pth voice model
+    rvc_index: str | None = None  # optional .index file that sharpens the voice likeness
+    rvc_key: float = 0.0  # semitones: 0 for male->male models, -12 if the model is female/high
+    rvc_block_ms: int = 250  # smaller = less delay, needs a faster GPU
+    rvc_index_rate: float = 0.5
+    rvc_protect: float = 0.33
+    rvc_device: str = "auto"  # auto, cuda, cpu
+    rvc_trust_model: bool = False  # allow full-pickle loading for old .pth files (only if you trust them)
+    rvc_hubert: str | None = None  # optional local HuBERT folder (otherwise downloaded once)
+    rvc_rmvpe: str | None = None  # optional local rmvpe.pt (otherwise downloaded once)
+
+    # voice cloning (XTTS) for typed/AI speech - set tts_backend to "xtts"
+    voice_clip: str | None = None  # 10-30 s .wav of the voice to clone (with the speaker's permission)
+    xtts_license_accepted: bool = False
 
     hotkeys: dict = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
     settings_version: int = SETTINGS_VERSION

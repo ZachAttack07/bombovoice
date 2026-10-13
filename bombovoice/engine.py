@@ -12,6 +12,7 @@ import random
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -163,6 +164,11 @@ class Engine:
         self._translator = None
         self._tts = None
         self._tts_backup = None
+        self._rvc_stage = None
+        self._rvc_lock = threading.Lock()
+        self._rvc_generation = 0
+        self._rvc_overruns_seen = 0
+        self._last_health_check = time.monotonic()
         self._last_adlib = time.monotonic()
         self._ai_ready = threading.Event()
         self._stt_error: str | None = None
@@ -194,20 +200,116 @@ class Engine:
     def _load_ai(self):
         from .ai import describe, translator_from_settings
         from .stt import UtteranceDetector
-        from .tts import make_tts_process
 
         self._detector = UtteranceDetector(self.sr)
         self._translator = translator_from_settings(self.s)
         self.status(f"Translator: {describe(self._translator)}")
         try:
-            self._tts = make_tts_process(self.s.tts_backend, self.s.tts_voice, self.sr)
-            self.status(f"Voice synth: {self._tts.name}")
+            self._build_tts()
         except Exception as exc:
             self.status(f"Text-to-speech unavailable: {exc}")
+        if self.s.quality == "rvc":
+            self._start_rvc()
         if self.s.mode in ("ai", "hybrid"):
             self._ensure_transcriber()
         self._ai_ready.set()
         self._prerender_adlibs()
+
+    # ------------------------------------------------------------- voices
+    def _build_tts(self):
+        """(Re)create the speaking voice: normal TTS, or the cloned XTTS voice on the GPU."""
+        from .tts import make_tts_process
+
+        backend = self.s.tts_backend
+        if backend == "xtts":
+            self.status("Loading your cloned voice (XTTS)... the first time downloads ~1.8 GB, hold tight")
+            try:
+                tts = make_tts_process("xtts", None, self.sr, voice_clip=self.s.voice_clip,
+                                       license_accepted=bool(self.s.xtts_license_accepted))
+            except Exception as exc:
+                self.status(f"Cloned voice unavailable ({str(exc)[:160]}) - using the normal voice")
+                tts = make_tts_process("auto", self.s.tts_voice, self.sr)
+        else:
+            tts = make_tts_process(backend, self.s.tts_voice, self.sr)
+        old, self._tts = self._tts, tts
+        self.adlibs = {}
+        if hasattr(old, "close"):
+            old.close()
+        self.status(f"Voice synth: {tts.name}")
+
+    def _rebuild_tts(self):
+        try:
+            self._build_tts()
+        except Exception as exc:
+            self.status(f"Text-to-speech unavailable: {exc}")
+            return
+        self._prerender_adlibs()
+
+    def _start_rvc(self):
+        """Load the GPU AI voice in the background; the PSOLA voice covers you until it's ready."""
+        if not self.s.rvc_model:
+            self.status("AI voice: pick a voice model (.pth) first - using the Natural engine meanwhile")
+            return
+        with self._rvc_lock:
+            self._rvc_generation += 1
+            gen = self._rvc_generation
+        threading.Thread(target=self._load_rvc, args=(gen,), name="bombovoice-rvc-loader", daemon=True).start()
+
+    def _load_rvc(self, gen: int):
+        try:
+            from .rvc.stream import RVCStage, StreamingRVC, torch_info
+        except ImportError as exc:
+            self.status(f"AI voice needs the GPU pack - run setup_gpu.bat ({exc})")
+            return
+        info = torch_info()
+        if info["torch"] is None:
+            self.status("AI voice needs PyTorch - run setup_gpu.bat")
+            return
+        if info["error"]:
+            self.status(info["error"])
+        where = info["gpu"] or "CPU (too slow for live use - check setup_gpu.bat)"
+        self.status(f"Loading AI voice on {where}... the first time downloads ~550 MB of base models")
+        try:
+            rvc = StreamingRVC(self.s.rvc_model, io_sr=self.sr, device=self.s.rvc_device, key=self.s.rvc_key,
+                               block_time=self.s.rvc_block_ms / 1000.0, index_path=self.s.rvc_index or None,
+                               index_rate=self.s.rvc_index_rate, protect=self.s.rvc_protect,
+                               allow_pickle=bool(self.s.rvc_trust_model), hubert_path=self.s.rvc_hubert or None,
+                               rmvpe_path=self.s.rvc_rmvpe or None)
+            rvc.warmup()
+        except Exception as exc:
+            log.exception("AI voice failed to load")
+            self.status(f"AI voice failed: {str(exc)[:200]} - staying on the Natural engine")
+            return
+        stage = RVCStage(rvc, lilt_engine=self.chain.lilt_engine)
+        with self._rvc_lock:
+            if gen != self._rvc_generation or self.s.quality != "rvc":
+                stage.close()  # settings changed while loading
+                return
+            old, self._rvc_stage = self._rvc_stage, stage
+            self._rvc_overruns_seen = 0
+        if old is not None:
+            old.close()
+        self.status(f"AI voice LIVE on {rvc.device.upper()}: {Path(self.s.rvc_model).name} "
+                    f"(delay about {int(rvc.latency_s * 1000) + 40} ms)")
+
+    def _stop_rvc(self):
+        with self._rvc_lock:
+            self._rvc_generation += 1
+            old, self._rvc_stage = self._rvc_stage, None
+        if old is not None:
+            old.close()
+
+    def _check_health(self):
+        """Every few seconds: warn if the GPU can't keep up with the live AI voice."""
+        now = time.monotonic()
+        if now - self._last_health_check < 5.0:
+            return
+        self._last_health_check = now
+        stage = self._rvc_stage
+        if stage is not None and stage.overruns > self._rvc_overruns_seen:
+            self._rvc_overruns_seen = stage.overruns
+            self.status(f"AI voice is falling behind ({stage.last_ms:.0f} ms per {self.s.rvc_block_ms} ms block) - "
+                        "raise the AI voice block size or close other GPU apps")
 
     def _rebuild_translator(self):
         from .ai import describe, translator_from_settings
@@ -256,7 +358,9 @@ class Engine:
 
     def _backup_tts(self):
         """Edge TTS needs internet - keep an offline PC voice on standby for single failed lines."""
-        if self._tts is None or self._tts.name != "edge" or self.s.tts_backend != "auto":
+        if self._tts is None or self._tts.name not in ("edge", "xtts"):
+            return None
+        if self._tts.name == "edge" and self.s.tts_backend != "auto":
             return None
         if self._tts_backup is None:
             from .tts import make_tts_process
@@ -294,6 +398,9 @@ class Engine:
             y = x * db_to_gain(self.s.mic_gain_db)
         elif mode == "ai":
             y = np.zeros_like(x)  # your real voice is replaced by the AI performance
+        elif self.s.quality == "rvc" and self._rvc_stage is not None:
+            self._rvc_stage.feed(x)  # GPU AI voice runs on its own thread
+            y = self.chain.post(self._rvc_stage.read(len(x)))
         else:
             y = self.chain.process(x)
         if mode in ("ai", "hybrid") and self._detector is not None and not self.muted:
@@ -313,6 +420,7 @@ class Engine:
             self.history[:-n] = self.history[n:]
             self.history[-n:] = mix
         self._maybe_auto_adlib()
+        self._check_health()
         return mix
 
     def process_block(self, block: np.ndarray) -> np.ndarray:
@@ -402,6 +510,7 @@ class Engine:
 
     def close(self):
         self.stop()
+        self._stop_rvc()
         self.jobs.put(("quit", None))
         for tts in (self._tts, self._tts_backup):
             if hasattr(tts, "close"):
@@ -541,6 +650,23 @@ class Engine:
             c.set_formant(self.s.formant)
         if "quality" in changes:
             c.set_quality(self.s.quality, self.s.formant)
+            if self.s.quality == "rvc":
+                self._start_rvc()
+            else:
+                self._stop_rvc()
+        stage = self._rvc_stage
+        if stage is not None:  # cheap AI voice tweaks apply instantly
+            if "rvc_key" in changes:
+                stage.rvc.key = float(self.s.rvc_key)
+            if "rvc_index_rate" in changes:
+                stage.rvc.index_rate = float(self.s.rvc_index_rate)
+            if "rvc_protect" in changes:
+                stage.rvc.protect = float(self.s.rvc_protect)
+        reload_keys = {"rvc_model", "rvc_index", "rvc_block_ms", "rvc_device", "rvc_trust_model", "rvc_hubert", "rvc_rmvpe"}
+        if reload_keys & changes.keys() and self.s.quality == "rvc":
+            self._start_rvc()
+        if {"tts_backend", "voice_clip", "xtts_license_accepted", "tts_voice"} & changes.keys() and self._ai_ready.is_set():
+            threading.Thread(target=self._rebuild_tts, name="bombovoice-tts-loader", daemon=True).start()
         if "rasp" in changes:
             c.rasp = float(self.s.rasp)
         if "echo" in changes:

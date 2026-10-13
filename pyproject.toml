@@ -21,6 +21,9 @@ dependencies = [
 ai = ["anthropic>=1.0", "faster-whisper>=1.0", "edge-tts>=6.1", "praat-parselmouth>=0.4.3"]
 offline-voice = ["pyttsx3>=2.90"]
 hotkeys = ["pynput>=1.7"]
+# GPU AI voice (RVC) + voice cloning (XTTS). Install PyTorch with CUDA FIRST (setup_gpu.bat does this),
+# otherwise pip pulls a CPU-only build on Windows.
+gpu = ["transformers>=4.57,<5", "librosa>=0.10", "huggingface_hub>=0.24", "coqui-tts>=0.27", "faiss-cpu>=1.8"]
 all = ["anthropic>=1.0", "faster-whisper>=1.0", "edge-tts>=6.1", "praat-parselmouth>=0.4.3", "pyttsx3>=2.90", "pynput>=1.7"]
 dev = ["pytest>=7"]
 
@@ -28,7 +31,15 @@ dev = ["pytest>=7"]
 bombovoice = "bombovoice.cli:main"
 
 [tool.setuptools]
-packages = ["bombovoice"]
+packages = ["bombovoice", "bombovoice.rvc"]
+
+[tool.setuptools.package-data]
+"bombovoice.rvc" = ["LICENSE-infer-rvc-python.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+# vendored third-party RVC model code, kept as close to upstream as possible
+extend-exclude = ["bombovoice/rvc/commons.py", "bombovoice/rvc/transforms.py", "bombovoice/rvc/modules.py",
+                  "bombovoice/rvc/attentions.py", "bombovoice/rvc/models.py", "bombovoice/rvc/rmvpe.py"]

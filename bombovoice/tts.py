@@ -51,6 +51,7 @@ class TTSError(RuntimeError):
 
 class BaseTTS:
     name = "base"
+    lilt_scale = 1.0  # how much of Bombovoice's own intonation to add on top of the voice
 
     def __init__(self, sample_rate: int = 48000, base_rate: int = 4, base_pitch_hz: int = -2):
         self.sr = sample_rate
@@ -92,7 +93,7 @@ class BaseTTS:
             return np.zeros(0, dtype=np.float32)
         audio = _trim_silence(self.synth(text, self.base_rate, self.base_pitch_hz, 0), self.sr)
         audio = apply_lilt(audio, self.sr, [s for s in segments if speakable(s.text)], weights,
-                           lilt=lilt, base=deepen)
+                           lilt=lilt * self.lilt_scale, base=deepen * self.lilt_scale)
         return normalize(audio, -2)
 
     def say(self, text: str, **kwargs) -> np.ndarray:
@@ -208,11 +209,99 @@ class Pyttsx3TTS(BaseTTS):
         return resample(audio.mean(axis=1), sr, self.sr)
 
 
-def make_tts(backend: str = "auto", voice: str | None = None, sample_rate: int = 48000) -> BaseTTS:
+XTTS_REPO = "coqui/XTTS-v2"
+XTTS_FILES = ["config.json", "model.pth", "vocab.json", "speakers_xtts.pth"]
+XTTS_LICENSE_URL = "https://coqui.ai/cpml"
+
+
+def _import_xtts():
+    """Import coqui's XTTS without its torchcodec requirement.
+
+    coqui-tts refuses to import on PyTorch 2.9+ unless torchcodec (which needs a separate
+    FFmpeg install on Windows) is present - but it only uses it to *load audio files*.
+    Bombovoice loads the reference clip itself, so we skip that check while importing.
+    """
+    import transformers.utils.import_utils as iu
+
+    original = iu.is_torchcodec_available
+    try:
+        iu.is_torchcodec_available = lambda: True
+        from TTS.tts.configs.xtts_config import XttsConfig
+        from TTS.tts.models.xtts import Xtts
+    finally:
+        iu.is_torchcodec_available = original
+    return XttsConfig, Xtts
+
+
+class XTTS(BaseTTS):
+    """Coqui XTTS-v2 voice cloning: speaks in the voice *and accent* of a short reference clip.
+
+    Give it 10-30 s of clean speech from a (consenting!) Jamaican speaker and every line
+    comes out in that voice with a real Jamaican accent. Runs on the GPU when available.
+    """
+
+    name = "xtts"
+    lilt_scale = 0.35  # the cloned voice already has real Jamaican intonation
+
+    def __init__(self, voice_clip: str | None, device: str = "auto", model_dir: str | None = None,
+                 license_accepted: bool = False, **kw):
+        super().__init__(**kw)
+        if not license_accepted:
+            raise TTSError("XTTS-v2 is under the Coqui Public Model License (non-commercial use only) - "
+                           f"accept it in the app first ({XTTS_LICENSE_URL})")
+        if not voice_clip or not Path(voice_clip).exists():
+            raise TTSError("pick a voice clip (10-30 s of clear speech) for the cloned voice")
+        import torch
+
+        XttsConfig, Xtts = _import_xtts()
+        if model_dir is None:
+            from huggingface_hub import hf_hub_download
+
+            for f in XTTS_FILES:
+                path = hf_hub_download(XTTS_REPO, f, cache_dir=str(CACHE_DIR / "xtts"))
+            model_dir = str(Path(path).parent)
+        self.device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
+        config = XttsConfig()
+        config.load_json(str(Path(model_dir) / "config.json"))
+        model = Xtts.init_from_config(config)
+        model.load_checkpoint(config, checkpoint_dir=model_dir, use_deepspeed=False)
+        model.to(self.device)
+        model.eval()  # (XTTS's eval() returns None, so don't chain it)
+        self.model = model
+        self.out_sr = int(config.audio.output_sample_rate)
+        self.set_voice(voice_clip)
+
+    def set_voice(self, voice_clip: str):
+        import soundfile as sf
+        import torch
+
+        audio, sr = sf.read(voice_clip, dtype="float32", always_2d=True)
+        audio = resample(audio.mean(axis=1), sr, 22050)[: 22050 * 30]
+        audio = audio / (np.max(np.abs(audio)) + 1e-9) * 0.75
+        wav = torch.from_numpy(audio).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            self.speaker = self.model.get_speaker_embedding(wav, 22050)
+            self.gpt_latent = self.model.get_gpt_cond_latents(wav, 22050, length=6, chunk_length=6)
+        self.voice_clip = voice_clip
+
+    def synth(self, text, rate=0, pitch_hz=0, volume=0):
+        import torch
+
+        with torch.no_grad():
+            out = self.model.inference(text, "en", self.gpt_latent, self.speaker, temperature=0.65,
+                                       speed=float(np.clip(1 + rate / 100, 0.7, 1.4)), enable_text_splitting=True)
+        wav = out["wav"]
+        wav = wav.detach().cpu().numpy() if hasattr(wav, "detach") else np.asarray(wav)
+        return resample(np.asarray(wav, dtype=np.float32).reshape(-1), self.out_sr, self.sr)
+
+
+def make_tts(backend: str = "auto", voice: str | None = None, sample_rate: int = 48000, **opts) -> BaseTTS:
     order = ["edge", "pyttsx3"] if backend == "auto" else [backend]
     errors = []
     for name in order:
         try:
+            if name == "xtts":
+                return XTTS(sample_rate=sample_rate, **opts)
             if name == "edge":
                 return EdgeTTS(voice=voice or DEFAULT_EDGE_VOICE, sample_rate=sample_rate)
             if name == "pyttsx3":
@@ -234,10 +323,10 @@ def make_tts(backend: str = "auto", voice: str | None = None, sample_rate: int =
 _worker_tts: BaseTTS | None = None
 
 
-def _worker_init(backend: str, voice: str | None, sample_rate: int):
+def _worker_init(backend: str, voice: str | None, sample_rate: int, opts: dict):
     global _worker_tts
     logging.basicConfig(level=logging.WARNING)
-    _worker_tts = make_tts(backend, voice, sample_rate)
+    _worker_tts = make_tts(backend, voice, sample_rate, **opts)
 
 
 def _worker_name() -> str:
@@ -254,16 +343,16 @@ class TTSProcess:
     """Same interface as a TTS backend (name / perform / say) but runs in its own process."""
 
     def __init__(self, backend: str = "auto", voice: str | None = None, sample_rate: int = 48000,
-                 timeout: float = 120.0):
+                 timeout: float = 120.0, start_timeout: float = 90.0, **opts):
         import multiprocessing
         from concurrent.futures import ProcessPoolExecutor
 
         self.sr = sample_rate
         self.timeout = timeout
         self._pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
-                                         initializer=_worker_init, initargs=(backend, voice, sample_rate))
+                                         initializer=_worker_init, initargs=(backend, voice, sample_rate, opts))
         try:
-            self.name = self._pool.submit(_worker_name).result(timeout=90)
+            self.name = self._pool.submit(_worker_name).result(timeout=start_timeout)
         except Exception as exc:
             self._pool.shutdown(wait=False, cancel_futures=True)
             raise TTSError(f"could not start the speech worker: {exc}") from exc
@@ -278,10 +367,14 @@ class TTSProcess:
         self._pool.shutdown(wait=False, cancel_futures=True)
 
 
-def make_tts_process(backend: str = "auto", voice: str | None = None, sample_rate: int = 48000):
+def make_tts_process(backend: str = "auto", voice: str | None = None, sample_rate: int = 48000, **opts):
     """Speech in a worker process when possible (keeps the live voice glitch-free)."""
+    # the first XTTS start downloads ~1.8 GB, so give it time
+    start_timeout = 3600.0 if backend == "xtts" else 90.0
     try:
-        return TTSProcess(backend, voice, sample_rate)
+        return TTSProcess(backend, voice, sample_rate, start_timeout=start_timeout, **opts)
     except TTSError as exc:
+        if backend == "xtts":
+            raise
         log.info("speech worker unavailable (%s); rendering in-process", exc)
-        return make_tts(backend, voice, sample_rate)
+        return make_tts(backend, voice, sample_rate, **opts)

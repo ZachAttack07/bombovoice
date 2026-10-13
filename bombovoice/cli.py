@@ -48,6 +48,10 @@ def _apply_common(s: Settings, a: argparse.Namespace):
         val = getattr(a, key, None)
         if val is not None:
             setattr(s, key, val)
+    if getattr(a, "rvc_model", None):
+        s.rvc_model, s.quality = a.rvc_model, "rvc"
+    if getattr(a, "rvc_key", None) is not None:
+        s.rvc_key = a.rvc_key
     if getattr(a, "spicy", False):
         s.spicy = True
     if getattr(a, "no_ai", False):
@@ -194,6 +198,46 @@ def cmd_devices(a, s: Settings):
         print(f"{d['index']:>3}  {d['inputs']:>2} {d['outputs']:>3}  {d['hostapi']:<20} {d['name']}{mark}")
 
 
+def cmd_gpu_check(a, s: Settings):
+    """Report what the AI voice / voice cloning will run on, and test the GPU for real."""
+    try:
+        from .rvc.stream import torch_info
+    except ImportError as exc:
+        print(f"GPU pack missing ({exc}). Run setup_gpu.bat.")
+        return
+    info = torch_info()
+    if info["torch"] is None:
+        print("PyTorch is not installed. Run setup_gpu.bat.")
+        return
+    print(f"PyTorch {info['torch']}")
+    print(f"GPU:    {info['gpu'] or 'none (CPU only)'}")
+    if info["error"]:
+        print(f"PROBLEM: {info['error']}")
+        return
+    if info["device"] != "cuda":
+        print("No CUDA GPU visible. Check: NVIDIA driver up to date (RTX 50-series needs 570+), and that setup_gpu.bat "
+              "installed a CUDA build of PyTorch (version ends in +cu128/+cu130, not +cpu).")
+        return
+    import time
+
+    import torch
+
+    x = torch.randn(4096, 4096, device="cuda", dtype=torch.float16)
+    torch.cuda.synchronize()
+    t = time.perf_counter()
+    for _ in range(20):
+        x = (x @ x).clamp_(-1, 1)
+    torch.cuda.synchronize()
+    tflops = 20 * 2 * 4096 ** 3 / (time.perf_counter() - t) / 1e12
+    print(f"GPU test OK: {tflops:.1f} TFLOPS fp16. You're good to go - tick 'Live AI voice' in the app.")
+    for mod, what in (("transformers", "AI voice"), ("TTS", "voice cloning"), ("faiss", "AI voice .index files")):
+        try:
+            __import__(mod) if mod != "TTS" else __import__("bombovoice.tts", fromlist=["_import_xtts"])._import_xtts()
+            print(f"  {what}: ready")
+        except Exception as exc:
+            print(f"  {what}: missing ({exc.__class__.__name__}) - re-run setup_gpu.bat")
+
+
 def cmd_setup(a, s: Settings):
     from .devices import create_linux_virtual_mic, setup_instructions
 
@@ -287,7 +331,9 @@ def build_parser() -> argparse.ArgumentParser:
     lv.add_argument("--output-device", help="output name or index (default: auto-detect virtual cable)")
     lv.add_argument("--monitor", action="store_true", help="also hear yourself in your headphones")
     lv.add_argument("--echo", action="store_true", help="start with dub echo on")
-    lv.add_argument("--quality", choices=["hq", "fast"])
+    lv.add_argument("--quality", choices=["natural", "rvc", "pv", "fast"])
+    lv.add_argument("--rvc-model", help="RVC voice model (.pth) - turns on the GPU AI voice")
+    lv.add_argument("--rvc-key", type=float, help="AI voice key in semitones")
     lv.add_argument("--whisper-model", help="faster-whisper model (tiny.en, base.en, small.en...)")
     lv.set_defaults(fn=cmd_live)
 
@@ -321,6 +367,9 @@ def build_parser() -> argparse.ArgumentParser:
     dv = sub.add_parser("devices", help="list audio devices")
     dv.add_argument("--test", action="store_true", help="try opening every device and report which work")
     dv.set_defaults(fn=cmd_devices)
+
+    gc = sub.add_parser("gpu-check", help="check the GPU for the AI voice and voice cloning")
+    gc.set_defaults(fn=cmd_gpu_check)
 
     st = sub.add_parser("setup", help="virtual microphone setup instructions")
     st.add_argument("--create", action="store_true", help="Linux: create the virtual mic with pactl")

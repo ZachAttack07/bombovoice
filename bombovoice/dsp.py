@@ -629,8 +629,12 @@ class VoiceChain:
             return x.astype(np.float32)
         y = self.hp.process(x)
         curve = self.lilt_engine.process(y)
-        y = self.shifter.process(y, curve).astype(np.float64)
-        y = self.eq.process(y)
+        y = self.shifter.process(y, curve)
+        return self.post(y)
+
+    def post(self, y: np.ndarray) -> np.ndarray:
+        """Tone stage (warmth, rasp, dub echo, limiter) - also used on the GPU AI voice."""
+        y = self.eq.process(np.asarray(y, dtype=np.float64))
         if self.rasp > 0:  # a little gravel in the throat
             drive = 1.0 + 6.0 * self.rasp
             y = (np.tanh(y * drive) / np.tanh(drive)) * self.rasp + y * (1 - self.rasp)

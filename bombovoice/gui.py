@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from .config import MODES, Settings
 from .patois import INTENSITY_NAMES, PatoisTranslator
@@ -22,6 +24,7 @@ SOUNDBOARD = [
 
 ENGINES = {
     "natural": "Natural (PSOLA) - recommended",
+    "rvc": "AI voice (RVC, GPU)",
     "pv": "Smooth (phase vocoder)",
     "fast": "Low latency (delay line)",
 }
@@ -47,7 +50,10 @@ class App:
         self.engine = None
         self.hotkeys = None
         self.devices = []
+        self._early_log: list[tuple[str, str | None]] = []
         self._build()
+        for text, tag in self._early_log:
+            self._log(text, tag)
         self._poll()
 
     # ------------------------------------------------------------------ layout
@@ -164,8 +170,7 @@ class App:
         self.engine_var = tk.StringVar(value=ENGINES[q])
         eb = ttk.Combobox(vc, textvariable=self.engine_var, state="readonly", width=26, values=list(ENGINES.values()))
         eb.grid(row=0, column=1, columnspan=2, sticky="w", padx=6, pady=2)
-        eb.bind("<<ComboboxSelected>>", lambda e: self._set(
-            quality={v: k for k, v in ENGINES.items()}[self.engine_var.get()]))
+        eb.bind("<<ComboboxSelected>>", lambda e: self._on_engine())
         for i, (key, label, lo, hi, res) in enumerate(SLIDERS, start=1):
             ttk.Label(vc, text=label).grid(row=i, column=0, sticky="w", padx=6)
             lbl = ttk.Label(vc, text=f"{getattr(self.s, key):.2f}", width=6)
@@ -194,6 +199,9 @@ class App:
         entry.bind("<Return>", lambda e: self._say())
         ttk.Button(ts, text="Say it!", command=self._say).pack(side="left", padx=4)
         ttk.Button(ts, text="Preview", command=self._preview).pack(side="left", padx=(0, 6))
+
+        # --- GPU AI voice + voice cloning
+        self._build_gpu_panel(right)
 
         # --- meter + log
         mf = tk.Frame(right, bg=BG)
@@ -273,6 +281,132 @@ class App:
             self._log("Hotkeys: " + self.hotkeys.describe(), "status")
         self.go_btn.configure(text="■  STOP")
 
+    # ----------------------------------------------------------- GPU panel
+    def _build_gpu_panel(self, parent):
+        gp = ttk.LabelFrame(parent, text="AI voice (GPU)")
+        gp.pack(fill="x", pady=(0, 8))
+        gp.columnconfigure(2, weight=1)
+        self.gpu_var = tk.StringVar(value="Checking GPU...")
+        ttk.Label(gp, textvariable=self.gpu_var, style="Muted.TLabel").grid(row=0, column=0, columnspan=4, sticky="w",
+                                                                           padx=6, pady=(2, 4))
+        threading.Thread(target=self._detect_gpu, daemon=True).start()
+
+        # live RVC voice
+        self.rvc_on = tk.BooleanVar(value=self.s.quality == "rvc")
+        ttk.Checkbutton(gp, text="Live AI voice", variable=self.rvc_on, command=self._toggle_rvc).grid(
+            row=1, column=0, sticky="w", padx=6)
+        ttk.Button(gp, text="Model (.pth)...", command=self._pick_rvc_model).grid(row=1, column=1, sticky="w")
+        self.rvc_name = tk.StringVar(value=self._short(self.s.rvc_model, "none chosen"))
+        ttk.Label(gp, textvariable=self.rvc_name).grid(row=1, column=2, sticky="w", padx=6)
+        ttk.Button(gp, text="Index...", command=self._pick_rvc_index).grid(row=1, column=3, sticky="e", padx=6)
+        ttk.Label(gp, text="AI voice key").grid(row=2, column=0, sticky="w", padx=6)
+        self.key_label = ttk.Label(gp, text=f"{self.s.rvc_key:+.0f} st")
+        key = ttk.Scale(gp, from_=-12, to=12, orient="horizontal", length=180, command=self._on_key)
+        key.set(self.s.rvc_key)
+        key.grid(row=2, column=1, columnspan=2, sticky="w")
+        self.key_label.grid(row=2, column=3, sticky="e", padx=6)
+
+        # XTTS cloned voice for typed / AI lines
+        self.clone_on = tk.BooleanVar(value=self.s.tts_backend == "xtts")
+        ttk.Checkbutton(gp, text="Cloned voice for typed/AI lines", variable=self.clone_on,
+                        command=self._toggle_clone).grid(row=3, column=0, columnspan=2, sticky="w", padx=6, pady=(4, 2))
+        ttk.Button(gp, text="Voice clip...", command=self._pick_clip).grid(row=3, column=2, sticky="w", pady=(4, 2))
+        self.clip_name = tk.StringVar(value=self._short(self.s.voice_clip, "none chosen"))
+        ttk.Label(gp, textvariable=self.clip_name).grid(row=3, column=3, sticky="e", padx=6)
+
+    @staticmethod
+    def _short(path, default):
+        return Path(path).name if path else default
+
+    def _detect_gpu(self):
+        try:
+            from .rvc.stream import torch_info
+
+            info = torch_info()
+        except Exception as exc:  # pragma: no cover - depends on the machine
+            info = {"torch": None, "error": str(exc)}
+        if info.get("torch") is None:
+            text = "GPU pack not installed - run setup_gpu.bat to enable the AI voice and voice cloning"
+        elif info.get("error"):
+            text = info["error"]
+        elif info.get("gpu"):
+            text = f"GPU ready: {info['gpu']}  |  PyTorch {info['torch']}"
+        else:
+            text = f"No CUDA GPU found (PyTorch {info['torch']}) - AI voice would run on CPU and stutter"
+        self.events.put(("gpu", text))
+
+    def _pick_rvc_model(self):
+        path = filedialog.askopenfilename(title="Choose an RVC voice model", filetypes=[("RVC model", "*.pth")])
+        if path:
+            self.rvc_name.set(Path(path).name)
+            self._set(rvc_model=path)
+
+    def _pick_rvc_index(self):
+        path = filedialog.askopenfilename(title="Choose the model's .index file (optional)",
+                                          filetypes=[("RVC index", "*.index")])
+        if path:
+            self._set(rvc_index=path)
+            self.status_var.set(f"Index: {Path(path).name}")
+
+    def _toggle_rvc(self):
+        if self.rvc_on.get() and not self.s.rvc_model:
+            self._pick_rvc_model()
+            if not self.s.rvc_model:
+                self.rvc_on.set(False)
+                return
+        quality = "rvc" if self.rvc_on.get() else "natural"
+        self.engine_var.set(ENGINES[quality])
+        self._set(quality=quality)
+
+    def _on_key(self, value):
+        v = round(float(value))
+        self.key_label.configure(text=f"{v:+d} st")
+        if v != self.s.rvc_key:
+            self._set(rvc_key=float(v))
+
+    def _pick_clip(self):
+        path = filedialog.askopenfilename(title="Choose 10-30 s of clear speech to clone",
+                                          filetypes=[("Audio", "*.wav *.flac *.ogg *.mp3")])
+        if path:
+            self.clip_name.set(Path(path).name)
+            self._set(voice_clip=path)
+
+    def _toggle_clone(self):
+        if not self.clone_on.get():
+            self._set(tts_backend="auto")
+            return
+        if not self.s.xtts_license_accepted:
+            from .tts import XTTS_LICENSE_URL
+
+            ok = messagebox.askyesno(
+                "Voice cloning licence",
+                "Voice cloning uses the XTTS-v2 model (about 1.8 GB, downloaded once).\n\n"
+                "It is released under the Coqui Public Model License, which allows NON-COMMERCIAL use only:\n"
+                f"{XTTS_LICENSE_URL}\n\n"
+                "Only clone a voice you have permission to use (yours, or a friend who agreed). "
+                "Don't clone real public figures.\n\nDo you accept the licence?")
+            if not ok:
+                self.clone_on.set(False)
+                return
+            self._set(xtts_license_accepted=True)
+        if not self.s.voice_clip:
+            self._pick_clip()
+            if not self.s.voice_clip:
+                self.clone_on.set(False)
+                return
+        self._set(tts_backend="xtts")
+
+    def _on_engine(self):
+        quality = {v: k for k, v in ENGINES.items()}[self.engine_var.get()]
+        if quality == "rvc" and not self.s.rvc_model:
+            self._pick_rvc_model()
+            if not self.s.rvc_model:
+                self.engine_var.set(ENGINES.get(self.s.quality, ENGINES["natural"]))
+                return
+        if hasattr(self, "rvc_on"):
+            self.rvc_on.set(quality == "rvc")
+        self._set(quality=quality)
+
     def _set(self, **changes):
         if self.engine:
             self.engine.set(**changes)
@@ -321,6 +455,9 @@ class App:
         self._refresh_devices()
 
     def _log(self, text, tag=None):
+        if not hasattr(self, "log"):  # messages from before the log panel exists
+            self._early_log.append((text, tag))
+            return
         self.log.configure(state="normal")
         self.log.insert("end", text + "\n", tag)
         self.log.see("end")
@@ -339,6 +476,8 @@ class App:
                 elif kind == "status":
                     self.status_var.set(str(payload))
                     self._log(f"* {payload}", "status")
+                elif kind == "gpu":
+                    self.gpu_var.set(str(payload))
                 elif kind == "sfx":
                     self.status_var.set(f"{payload}!")
         except queue.Empty:

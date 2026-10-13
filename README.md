@@ -103,6 +103,51 @@ On Linux you also need `sudo apt install libportaudio2 python3-tk`.
 
 ---
 
+## GPU features (NVIDIA): sound like a *real* person
+
+These are optional, but they're the biggest upgrade. They need an NVIDIA GPU. RTX 50-series cards
+like the RTX 5060 are supported, but need NVIDIA driver 570 or newer.
+
+### One-time setup
+1. Update your NVIDIA driver (GeForce Experience / NVIDIA App, or nvidia.com).
+2. Run `run_windows.bat` once if you haven't already.
+3. Double-click **`setup_gpu.bat`**. It installs PyTorch built for CUDA 12.8+ (about 3 GB; needed for RTX 50-series)
+   plus the AI packages, then runs a GPU check. You want to see `GPU test OK`.
+   You can re-check any time with `.venv\Scripts\python -m bombovoice gpu-check`.
+
+### 1. Live AI voice (RVC)
+A neural network re-voices your microphone as the person in a **voice model** (`.pth` file), live.
+It sounds like a real human instead of an effect. Bombovoice's lilt engine steers the AI voice's pitch,
+so you still get the Jamaican sing-song, and the dub echo/warmth/limiter still apply.
+
+- In the app: **AI voice (GPU)** panel → *Model (.pth)...* → tick **Live AI voice**.
+  If the model came with an `.index` file, add it with *Index...*; it sharpens the likeness.
+- **AI voice key:** `0` for a male model when you're male; `+12`/`-12` to jump an octave between
+  male and female voices. Use small steps to taste.
+- Delay is about 0.3 s, the normal price for real-time AI voice. Lower `rvc_block_ms` in settings (e.g. 160)
+  for less delay if your GPU keeps up. The app warns you if it falls behind.
+- The first time, it downloads about 550 MB of base models (HuBERT + RMVPE) once.
+
+**Where do voice models come from?** RVC can't make you sound Jamaican by itself. It makes you sound like
+*the voice in the model*. The best result is a model of a Jamaican speaker **who agreed to it**. Train one with
+[Applio](https://github.com/IAHispano/Applio) from about 10–20 minutes of their clean recordings. A generic deep
+male voice model also works well with the Patois lilt. Don't use models that clone real celebrities or other
+real people without their permission.
+Models load safely by default. Old `.pth` files that need full pickle loading are refused unless you set
+`"rvc_trust_model": true`, and you should only do that for files you trust.
+
+### 2. Cloned voice for typed and AI lines (XTTS)
+For *Type it* and the AI modes, XTTS-v2 speaks in the **voice and accent of a short clip**. With a clip of
+a Jamaican speaker, every line comes out with a real Jamaican accent, not an approximation.
+
+- **AI voice (GPU)** panel → *Voice clip...* (10–30 s of clean speech, one speaker, no music) →
+  tick **Cloned voice for typed/AI lines** → accept the licence prompt.
+- XTTS-v2 is under the [Coqui Public Model License](https://coqui.ai/cpml): **non-commercial use only**.
+  It downloads about 1.8 GB the first time.
+- Again: only clone a voice you have permission to use.
+
+**Best combo:** Live AI voice for talking, cloned voice for typed punchlines and AI mode, plus the riddim and air horn.
+
 ## Command line
 
 ```bash
@@ -178,7 +223,8 @@ mic ─► VAD ─► Whisper ─► Claude (Haiku 5.5 via OpenRouter) ─► TT
 | `bombovoice/dsp.py` | Real-time PSOLA pitch/formant shifter (plus phase-vocoder and delay-line alternatives), **Lilt Engine**, dub echo, EQ, limiter |
 | `bombovoice/patois.py` | Offline English → Patois translator plus prosody segmentation |
 | `bombovoice/ai.py` | Claude director via OpenRouter or the Anthropic API (structured output: Patois text plus delivery plan) |
-| `bombovoice/tts.py` | Edge / pyttsx3 TTS that performs the delivery plan |
+| `bombovoice/tts.py` | Edge / pyttsx3 / XTTS voice-cloning TTS that performs the delivery plan (in a worker process) |
+| `bombovoice/rvc/` | Streaming GPU AI voice conversion (RVC): HuBERT + RMVPE + voice model, SOLA-stitched blocks |
 | `bombovoice/stt.py` | Voice activity detection and faster-whisper transcription |
 | `bombovoice/synth.py` | Air horn, siren, bass drop, rewind, laser, one-drop riddim generator |
 | `bombovoice/engine.py` | Real-time audio engine, mixer, AI worker, actions |
