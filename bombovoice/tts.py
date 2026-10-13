@@ -1,9 +1,8 @@
 """Text-to-speech that *performs* a delivery plan.
 
-Each prosody segment is synthesised separately with its own speed, pitch and
-loudness (stressed words come out slower, higher and louder), then bent along
-its Jamaican intonation contour with the phase-vocoder and stitched together
-with comic-timing pauses.
+The whole line is spoken in one take (so it flows like real speech) using
+"speakable" spellings that the voice pronounces instead of spelling out, then a
+gentle Jamaican intonation curve is laid over it with PSOLA (see prosody.py).
 
 Backends:
     edge     - Microsoft Edge neural voices (online, free, best quality)
@@ -23,8 +22,10 @@ from pathlib import Path
 
 import numpy as np
 
-from .dsp import apply_contour, normalize, resample
+from .dsp import normalize, resample
 from .patois import Segment, Translation
+from .pronounce import speakable
+from .prosody import apply_lilt
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class TTSError(RuntimeError):
 class BaseTTS:
     name = "base"
 
-    def __init__(self, sample_rate: int = 48000, base_rate: int = 6, base_pitch_hz: int = -4):
+    def __init__(self, sample_rate: int = 48000, base_rate: int = 4, base_pitch_hz: int = -2):
         self.sr = sample_rate
         self.base_rate = base_rate  # % faster than normal - Jamaican talk is quick and rhythmic
         self.base_pitch_hz = base_pitch_hz
@@ -64,33 +65,35 @@ class BaseTTS:
         return [self.synth(*job) for job in jobs]
 
     # -- shared -------------------------------------------------------------
-    def _params(self, seg: Segment) -> tuple[str, int, int, int]:
-        e = seg.emphasis
-        rate = self.base_rate - 6 * e  # stretch the punch words
-        pitch = self.base_pitch_hz + 7 * e
-        volume = min(0, -12 + 6 * e) if e < 3 else 0
-        if seg.contour == "low":
-            pitch -= 8
-            rate += 4
-        return seg.text, rate, pitch, volume
+    @staticmethod
+    def script(segments: list[Segment]) -> tuple[str, list[float]]:
+        """One TTS-ready string for the whole line, plus how much of it each segment takes."""
+        parts, weights = [], []
+        for seg in segments:
+            text = speakable(seg.text)
+            if not text:
+                continue
+            if seg.pause_after_ms >= 350 and text[-1] not in ".!?":
+                text += "..."  # a beat for comic timing
+            parts.append(text)
+            weights.append(len(text) + seg.pause_after_ms / 60.0)
+        return " ".join(parts), weights
 
     def perform(self, translation: Translation | list[Segment], lilt: float = 1.0,
-                formant: float = -1.0, deepen: float = 0.0) -> np.ndarray:
-        """Render a whole translation (or list of segments) to one clip at self.sr."""
+                formant: float = 0.0, deepen: float = 0.0) -> np.ndarray:
+        """Render a whole translation (or list of segments) to one clip at self.sr.
+
+        `formant` is accepted for compatibility; PSOLA keeps the voice's natural formants.
+        """
         segments = translation.segments if isinstance(translation, Translation) else translation
         segments = [s for s in segments if s.text.strip()]
-        if not segments:
+        text, weights = self.script(segments)
+        if not text:
             return np.zeros(0, dtype=np.float32)
-        clips = self.synth_many([self._params(s) for s in segments])
-        out = []
-        for seg, clip in zip(segments, clips):
-            clip = _trim_silence(clip, self.sr)
-            if lilt > 0 or deepen or formant:
-                depth = lilt * (0.8 + 0.3 * seg.emphasis)
-                clip = apply_contour(clip, self.sr, seg.contour, depth=depth, base=deepen, formant=formant)
-            out.append(clip)
-            out.append(np.zeros(int(self.sr * seg.pause_after_ms / 1000), dtype=np.float32))
-        return normalize(np.concatenate(out), -2)
+        audio = _trim_silence(self.synth(text, self.base_rate, self.base_pitch_hz, 0), self.sr)
+        audio = apply_lilt(audio, self.sr, [s for s in segments if speakable(s.text)], weights,
+                           lilt=lilt, base=deepen)
+        return normalize(audio, -2)
 
     def say(self, text: str, **kwargs) -> np.ndarray:
         return self.perform([Segment(text=text, emphasis=1, contour="rise_fall")], **kwargs)
@@ -201,14 +204,8 @@ class Pyttsx3TTS(BaseTTS):
                     os.remove(path)
                 except OSError:
                     pass
-        audio = resample(audio.mean(axis=1), sr, self.sr)
-        if pitch_hz:  # pyttsx3 has no pitch control; do it ourselves (~4 Hz per semitone for a male voice)
-            from .dsp import SpectralShifter
-
-            sh = SpectralShifter(self.sr, formant_semitones=0)
-            padded = np.concatenate([audio, np.zeros(sh.latency)])
-            audio = sh.process(padded, pitch_hz / 8.0)[sh.latency:]
-        return audio
+        # (pyttsx3 has no pitch control; overall pitch is handled by the PSOLA intonation pass)
+        return resample(audio.mean(axis=1), sr, self.sr)
 
 
 def make_tts(backend: str = "auto", voice: str | None = None, sample_rate: int = 48000) -> BaseTTS:

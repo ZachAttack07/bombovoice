@@ -61,7 +61,8 @@ transcript) and rewrite it as Jamaican Patois-flavoured English, then plan how t
 
 Rules for the rewrite:
 - Keep the speaker's meaning and keep it understandable to non-Jamaicans; it is a gag, not a puzzle.
-- Spell phonetically for an ENGLISH text-to-speech voice so it *pronounces* the accent: \
+- Spell it the common written-Patois way, sticking to familiar spellings like these (the app converts \
+them into sounds the voice can pronounce, so do not invent unusual new spellings): \
 "di" (the), "dem" (them/they/plural), "mi" (I/me/my), "yuh" (you), "tink" (think), "ting" (thing), \
 "likkle", "pickney", "bredda", "bredren", "nyam", "waan", "haffi", "cyaan", "neva", "nuff", "deh", \
 "wah gwaan", "bwoy", "irie", "seen?", "ya mon", "mek", "tek", "fi", "pon", "nutt'n", "sinting", "overstand".
@@ -69,6 +70,7 @@ Rules for the rewrite:
 "a" for -ing ("mi a come"), plural "dem" ("di car dem"), "fi" infinitives.
 - Add comedic flair sized to the intensity level: openers ("Bwoy,", "Yow!", "Lawd have mercy,"), \
 tags ("seen?", "ya mon", "fi real", "yuh zimmi?"), dramatic repetition ("big big", "likkle likkle").
+- Never write words in ALL CAPS (the voice would spell them out); show excitement with "!" instead.
 - Keep it affectionate. Never add drugs, crime, slurs or anything mean-spirited that the speaker did not say.
 - Profanity: only use Jamaican "claat" exclamations (bomboclaat, raasclaat, bloodclaat) when SPICY is on.
 - Keep the output roughly the same length as the input, at most about 2x plus a short opener/tag.

@@ -431,40 +431,8 @@ class VoiceChain:
 
 
 # ---------------------------------------------------------------------------
-# Offline helpers (used to perform TTS output with contours)
+# Offline helpers
 # ---------------------------------------------------------------------------
-
-
-CONTOUR_SHAPES = {
-    "flat": lambda t: 0.4 * np.sin(np.pi * t),
-    "rise": lambda t: -0.5 + 3.5 * t ** 1.6,
-    "fall": lambda t: 1.5 - 3.5 * t,
-    "rise_fall": lambda t: 3.2 * np.sin(np.pi * np.minimum(1.0, t * 1.25)) - 1.8 * np.maximum(0.0, t - 0.6) / 0.4,
-    "high": lambda t: 2.5 + 0.8 * np.sin(np.pi * t),
-    "low": lambda t: -2.0 + 0.3 * np.sin(np.pi * t),
-}
-
-
-def contour_curve(n: int, contour: str, depth: float = 1.0, base: float = 0.0) -> np.ndarray:
-    t = np.linspace(0.0, 1.0, max(1, n))
-    shape = CONTOUR_SHAPES.get(contour, CONTOUR_SHAPES["flat"])
-    return base + depth * shape(t)
-
-
-def apply_contour(audio: np.ndarray, sr: int, contour: str, depth: float = 1.0, base: float = 0.0,
-                  formant: float = 0.0) -> np.ndarray:
-    """Bend a finished clip (e.g. one TTS phrase) along a Jamaican intonation contour."""
-    audio = np.asarray(audio, dtype=np.float64)
-    if len(audio) == 0:
-        return audio.astype(np.float32)
-    shifter = SpectralShifter(sr, frame=1024 if sr <= 24000 else 2048, formant_semitones=formant)
-    lat = shifter.latency
-    padded = np.concatenate([audio, np.zeros(lat)])
-    curve = contour_curve(len(audio), contour, depth, base)
-    curve = np.concatenate([np.full(lat, curve[0]), curve])  # align the curve with the shifter's latency
-    hop = shifter.H
-    out = np.concatenate([shifter.process(padded[i:i + hop], curve[i:i + hop]) for i in range(0, len(padded), hop)])
-    return out[lat:lat + len(audio)].astype(np.float32)
 
 
 def resample(audio: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:

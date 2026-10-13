@@ -29,8 +29,11 @@ yaadie  : "Yow bredrin, wah gwaan? Mi a go fi play some games wid mi bredren dem
   "pickney", "wah gwaan", "seen?"), using real Patois grammar: copula drop, base-form past tense,
   "a" progressive, plural "dem".
 - Plans emphasis and intonation for each chunk (`rise`, `fall`, `rise_fall`, `high`, `low`) plus pauses.
-  The TTS renderer performs that plan: stressed words come out slower, higher and louder, and each chunk
-  is pitch-bent along its contour with a phase vocoder.
+  The TTS renderer speaks the whole line in one natural take, then lays one smooth Jamaican intonation
+  curve over it (phrases rise and fall, stressed words lift late) using Praat's PSOLA. That moves pitch
+  without a robotic sound, and the curve is capped at about ±3 semitones so nothing jumps wildly.
+- A pronunciation layer turns written Patois ("seh", "cyaan", "bwoy") into spellings the voice actually
+  *says* ("say", "kahn", "buh-woy") instead of spelling them out letter by letter. The screen still shows real Patois.
 - **5 characters:** `yaadie` (loud Kingston uncle), `dancehall` (hype MC at a sound clash), `rasta`
   (wise elder who *overstands*), `auntie` (scandalised by everything), `commentator` (calls everything like
   the Olympic 100m final).
@@ -147,6 +150,12 @@ and MME, so if you still see this:
    Advanced*, untick **Allow applications to take exclusive control of this device**.
 3. Run `bombovoice devices --test` (or `.venv\Scripts\python -m bombovoice devices --test` from the repo folder).
    It tries every device and marks which ones open with **OK**. Pick one of those in the app's Microphone list.
+
+**The typed/AI voice sounds robotic**
+Look at the log panel. It should say `Voice synth: edge`, which is the natural-sounding online neural voice.
+If you see `Online voice failed (...)`, that line was spoken by Windows' built-in voice, which is the robotic one.
+That usually means no internet, or an outdated `edge-tts`. `run_windows.bat` updates packages on every launch,
+so restarting it often fixes this. If it keeps happening, send the full error message from the log.
 
 ## How it works
 

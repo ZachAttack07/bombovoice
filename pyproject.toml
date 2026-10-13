@@ -18,10 +18,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ai = ["anthropic>=1.0", "faster-whisper>=1.0", "edge-tts>=6.1"]
+ai = ["anthropic>=1.0", "faster-whisper>=1.0", "edge-tts>=6.1", "praat-parselmouth>=0.4.3"]
 offline-voice = ["pyttsx3>=2.90"]
 hotkeys = ["pynput>=1.7"]
-all = ["anthropic>=1.0", "faster-whisper>=1.0", "edge-tts>=6.1", "pyttsx3>=2.90", "pynput>=1.7"]
+all = ["anthropic>=1.0", "faster-whisper>=1.0", "edge-tts>=6.1", "praat-parselmouth>=0.4.3", "pyttsx3>=2.90", "pynput>=1.7"]
 dev = ["pytest>=7"]
 
 [project.scripts]

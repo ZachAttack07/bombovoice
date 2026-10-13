@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from bombovoice.dsp import DubEcho, Limiter, PitchShifter, SpectralShifter, VoiceChain, apply_contour
+from bombovoice.dsp import DubEcho, Limiter, PitchShifter, SpectralShifter, VoiceChain
 
 SR = 48000
 
@@ -73,10 +73,3 @@ def test_echo_and_limiter():
     assert np.max(np.abs(y[d - 50:d + 400])) > 0.05  # first repeat arrives
     lim = Limiter(SR, ceiling_db=-1.0)
     assert np.max(np.abs(lim.process(np.ones(512) * 3.0))) <= 1.0
-
-
-def test_apply_contour_keeps_length():
-    x = 0.3 * np.sin(2 * np.pi * 200 * np.arange(SR) / SR)
-    for contour in ("rise", "fall", "rise_fall", "high", "low", "flat"):
-        y = apply_contour(x, SR, contour)
-        assert len(y) == len(x) and np.isfinite(y).all()

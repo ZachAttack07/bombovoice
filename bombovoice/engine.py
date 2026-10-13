@@ -127,6 +127,7 @@ class Engine:
         self._transcriber = None
         self._translator = None
         self._tts = None
+        self._tts_backup = None
         self._last_adlib = time.monotonic()
         self._ai_ready = threading.Event()
         self._stt_error: str | None = None
@@ -207,27 +208,42 @@ class Engine:
         for line in lines:
             if line in self.adlibs:
                 continue
-            try:
-                self.adlibs[line] = self._tts.say(line, lilt=self.s.tts_lilt, formant=self.s.formant,
-                                                  deepen=self.s.tts_pitch)
+            try:  # primary voice only - never cache the robotic fallback voice
+                self.adlibs[line] = self._tts.say(line, **self._voice_kw())
             except Exception as exc:
                 log.info("ad-lib pre-render stopped: %s", exc)
-                if self._fallback_tts():
-                    continue
                 return
 
-    def _fallback_tts(self) -> bool:
-        """Edge TTS needs internet - drop to the offline voices if it fails."""
-        if self._tts is not None and self._tts.name == "edge" and self.s.tts_backend == "auto":
+    def _voice_kw(self) -> dict:
+        return dict(lilt=self.s.tts_lilt, formant=self.s.formant, deepen=self.s.tts_pitch)
+
+    def _backup_tts(self):
+        """Edge TTS needs internet - keep an offline PC voice on standby for single failed lines."""
+        if self._tts is None or self._tts.name != "edge" or self.s.tts_backend != "auto":
+            return None
+        if self._tts_backup is None:
             from .tts import make_tts
 
             try:
-                self._tts = make_tts("pyttsx3", None, self.sr)
-                self.status("Online voice failed - switched to offline PC voice")
-                return True
+                self._tts_backup = make_tts("pyttsx3", None, self.sr)
             except Exception:
-                pass
-        return False
+                return None
+        return self._tts_backup
+
+    def _render(self, kind: str, payload) -> np.ndarray:
+        """Speak with the main voice; if it fails, say why and use the offline voice for this line only."""
+        def run(tts):
+            return tts.perform(payload, **self._voice_kw()) if kind == "perform" else tts.say(payload, **self._voice_kw())
+
+        try:
+            return run(self._tts)
+        except Exception as exc:
+            backup = self._backup_tts()
+            if backup is None:
+                raise
+            self.status(f"Online voice failed ({exc.__class__.__name__}: {str(exc)[:120]}) - "
+                        "using the offline PC voice for this line")
+            return run(backup)
 
     # ------------------------------------------------------------------- audio
     def process_input(self, block: np.ndarray) -> np.ndarray:
@@ -402,13 +418,7 @@ class Engine:
         if self._tts is None:
             self.status("No TTS voice available - showing text only")
             return
-        try:
-            audio = self._tts.perform(translation, lilt=self.s.tts_lilt, formant=self.s.formant, deepen=self.s.tts_pitch)
-        except Exception as exc:
-            if not self._fallback_tts():
-                raise
-            log.info("retrying with offline voice after: %s", exc)
-            audio = self._tts.perform(translation, lilt=self.s.tts_lilt, formant=self.s.formant, deepen=self.s.tts_pitch)
+        audio = self._render("perform", translation)
         self.mixer.play(audio, gain=1.0, tag="tts")
 
     def _play_adlib(self, line: str | None):
@@ -416,8 +426,7 @@ class Engine:
         line = line or random.choice(pool)
         clip = self.adlibs.get(line)
         if clip is None and self._tts is not None:
-            clip = self._tts.say(line, lilt=self.s.tts_lilt, formant=self.s.formant, deepen=self.s.tts_pitch)
-            self.adlibs[line] = clip
+            clip = self._render("say", line)
         self.emit("adlib", line)
         if clip is not None:
             self.mixer.play(clip, gain=0.9, tag="adlib")
