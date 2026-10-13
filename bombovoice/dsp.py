@@ -196,6 +196,195 @@ class SpectralShifter:
         return out.astype(np.float32)
 
 
+class PsolaShifter:
+    """Real-time TD-PSOLA pitch shifter with formant control - the natural-sounding one.
+
+    Instead of smearing the spectrum (phase vocoder -> "robot") it finds your pitch,
+    cuts your voice into grains exactly one vocal-cord cycle apart, and re-spaces those
+    grains to raise or lower the pitch. Each grain keeps its own shape, so the voice
+    keeps its natural texture. Formants are moved by gently stretching each grain, which
+    gives a bigger, deeper chest without the "slowed-down tape" effect. Unvoiced sounds
+    (s, f, t, breath) pass through un-pitched so consonants stay crisp.
+    """
+
+    def __init__(self, sample_rate: int, formant_semitones: float = 0.0, fmin: float = 70.0, fmax: float = 420.0):
+        self.sr = sample_rate
+        self.formant_semitones = formant_semitones
+        self.tmin = int(sample_rate / fmax)
+        self.tmax = int(sample_rate / fmin)
+        self.unvoiced_t = max(64, int(sample_rate * 0.005))
+        self.L = int(2.6 * self.tmax) + 64  # latency, enough look-ahead for one grain either side
+        self.win = int(sample_rate * 0.025)  # pitch-analysis window
+        self.reset()
+
+    @property
+    def latency(self) -> int:
+        return self.L
+
+    def reset(self):
+        self.inp = np.zeros(0)
+        self.base = 0  # absolute index of inp[0]
+        self.now = 0  # absolute samples received
+        self.marks_pos: list[int] = []
+        self.marks_t: list[int] = []
+        self.marks_v: list[bool] = []
+        self.last_mark = 0
+        self.period = int(self.sr / 120)
+        self.voiced = False
+        self.acc = np.zeros(0)
+        self.acc_base = -self.L
+        self.emit_pos = -self.L
+        self.next_syn = 0.0
+        self.rt_pos: list[float] = []
+        self.rt_ratio: list[float] = []
+        self._hann: dict[int, np.ndarray] = {}
+
+    # -- pitch detection (YIN) ----------------------------------------------
+    def _detect(self):
+        need = self.win + self.tmax
+        if len(self.inp) < need:
+            return
+        x = self.inp[-need:]
+        rms = float(np.sqrt(np.mean(x[-self.win:] ** 2)))
+        if rms < 0.004:
+            self.voiced = False
+            return
+        W, tmax = self.win, self.tmax
+        nfft = 1 << int(np.ceil(np.log2(need + W)))
+        X = np.fft.rfft(x, nfft)
+        F = np.fft.rfft(x[:W][::-1], nfft)
+        r = np.fft.irfft(X * F, nfft)[W - 1:W - 1 + tmax + 1]  # r(tau) = sum x[j] x[j+tau], j < W
+        cs = np.concatenate([[0.0], np.cumsum(x ** 2)])
+        e0 = cs[W]
+        et = cs[np.arange(tmax + 1) + W] - cs[np.arange(tmax + 1)]
+        d = np.maximum(e0 + et - 2 * r, 0.0)
+        d[0] = 0.0
+        cum = np.cumsum(d[1:])
+        cmnd = np.ones_like(d)
+        cmnd[1:] = d[1:] * np.arange(1, tmax + 1) / np.maximum(cum, 1e-12)
+        lo = self.tmin
+        seg = cmnd[lo:tmax]
+        below = np.flatnonzero(seg < 0.15)
+        if len(below):
+            i = below[0]
+            while i + 1 < len(seg) and seg[i + 1] < seg[i]:
+                i += 1
+        else:
+            i = int(np.argmin(seg))
+        tau, quality = lo + i, float(seg[i])
+        # hysteresis: easier to stay voiced than to become voiced, so vowels don't flicker
+        if quality > (0.5 if self.voiced else 0.35):
+            self.voiced = False
+            return
+        if self.voiced and abs(tau - self.period) < 0.2 * self.period:
+            tau = int(round(0.5 * tau + 0.5 * self.period))  # smooth small wobbles
+        self.period, self.voiced = int(tau), True
+
+    # -- analysis pitch marks -----------------------------------------------
+    def _place_marks(self):
+        T = self.period if self.voiced else self.unvoiced_t
+        while True:
+            cand = self.last_mark + T
+            h, d = T // 2, max(2, T // 8)
+            if cand + h + d + 1 >= self.now:
+                break
+            prev_voiced = bool(self.marks_v) and self.marks_v[-1]
+            if self.voiced and prev_voiced and self.last_mark - h - self.base >= 0:
+                # lock onto the same point of the vocal-cord cycle as the previous mark,
+                # so every grain is cut at the same phase (this is what keeps PSOLA smooth)
+                ref = self.inp[self.last_mark - h - self.base:self.last_mark + h - self.base]
+                a = cand - d - h - self.base
+                search = self.inp[a:a + 2 * d + 2 * h + 1]
+                corr = np.correlate(search, ref, mode="valid")
+                cs = np.concatenate([[0.0], np.cumsum(search ** 2)])
+                energy = np.sqrt(np.maximum(cs[2 * h:] - cs[:-2 * h], 1e-12))[:len(corr)]
+                cand = cand - d + int(np.argmax(corr / energy))
+            self.marks_pos.append(cand)
+            self.marks_t.append(T)
+            self.marks_v.append(self.voiced)
+            self.last_mark = cand
+
+    def _ratio_at(self, pos: float) -> float:
+        if not self.rt_pos:
+            return 1.0
+        return float(np.interp(pos, self.rt_pos, self.rt_ratio))
+
+    def _window(self, n: int) -> np.ndarray:
+        w = self._hann.get(n)
+        if w is None:
+            w = np.hanning(n + 2)[1:-1]
+            self._hann[n] = w
+        return w
+
+    def _add(self, start: int, grain: np.ndarray):
+        end = start + len(grain)
+        need = end - self.acc_base
+        if need > len(self.acc):
+            self.acc = np.concatenate([self.acc, np.zeros(need - len(self.acc) + 4096)])
+        a = start - self.acc_base
+        if a < 0:
+            grain = grain[-a:]
+            a = 0
+        self.acc[a:a + len(grain)] += grain
+
+    def process(self, x: np.ndarray, semitones) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64)
+        n = len(x)
+        if n == 0:
+            return x.astype(np.float32)
+        st = np.asarray(semitones, dtype=np.float64)
+        self.inp = np.concatenate([self.inp, x])
+        self.now += n
+        self.rt_pos.append(self.now - n / 2)
+        self.rt_ratio.append(float(2.0 ** (float(np.mean(st)) / 12.0)))
+        self._detect()
+        self._place_marks()
+
+        emit_end = self.now - self.L
+        f = 2.0 ** (self.formant_semitones / 12.0)
+        marks = self.marks_pos
+        if self.next_syn == 0.0 and marks:
+            self.next_syn = float(marks[0])
+        while self.next_syn < emit_end + self.tmax and marks:
+            ts = self.next_syn
+            j = int(np.searchsorted(marks, ts))
+            if j >= len(marks):
+                j = len(marks) - 1
+            elif j > 0 and ts - marks[j - 1] < marks[j] - ts:
+                j -= 1
+            ma, T, v = marks[j], self.marks_t[j], self.marks_v[j]
+            if ma + T >= self.now or ma - T < self.base:
+                break
+            grain = self.inp[ma - T - self.base:ma + T - self.base] * self._window(2 * T)
+            ratio = self._ratio_at(ts) if v else 1.0
+            if abs(f - 1.0) > 1e-3:  # stretch the grain -> move the formants
+                m = max(8, int(round(2 * T / f)))
+                grain = np.interp(np.linspace(0, 2 * T - 1, m), np.arange(2 * T), grain) * min(1.0, f)
+            self._add(int(round(ts)) - len(grain) // 2, grain / ratio if v else grain)
+            self.next_syn += T / ratio if v else T
+
+        out = self.acc[self.emit_pos - self.acc_base:emit_end - self.acc_base]
+        if len(out) < n:
+            out = np.concatenate([np.zeros(n - len(out)), out])
+        self.emit_pos = emit_end
+
+        # forget what we no longer need
+        keep_from = self.now - 3 * self.tmax - self.win
+        if keep_from > self.base + 4096:
+            cut = keep_from - self.base
+            self.inp = self.inp[cut:]
+            self.base = keep_from
+        drop = self.emit_pos - self.acc_base
+        if drop > 4096:
+            self.acc = self.acc[drop:]
+            self.acc_base = self.emit_pos
+        while len(self.marks_pos) > 2 and self.marks_pos[1] < self.next_syn - 2 * self.tmax:
+            del self.marks_pos[0], self.marks_t[0], self.marks_v[0]
+        if len(self.rt_pos) > 64:
+            del self.rt_pos[:32], self.rt_ratio[:32]
+        return out.astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # The Jamaican lilt
 # ---------------------------------------------------------------------------
@@ -210,8 +399,8 @@ class LiltEngine:
     - `phrase`: how much each phrase climbs and then falls at its end.
     """
 
-    def __init__(self, sample_rate: int, base: float = -2.5, swing: float = 1.6,
-                 stress: float = 2.8, phrase: float = 2.2, gate_db: float = -45.0, seed: int | None = None):
+    def __init__(self, sample_rate: int, base: float = -2.5, swing: float = 0.0,
+                 stress: float = 1.8, phrase: float = 1.4, gate_db: float = -45.0, seed: int | None = None):
         self.sr = sample_rate
         self.base, self.swing, self.stress, self.phrase = base, swing, stress, phrase
         self.gate = db_to_gain(gate_db)
@@ -254,8 +443,9 @@ class LiltEngine:
             if self.silence_time < 0.35:
                 self.ending = min(1.0, self.ending + dt * 5)
 
-        # phrase arc: climbs over the first ~1.5 s of a phrase
-        climb = self.phrase * self.phrase_target * min(1.0, self.speaking_time / 1.5)
+        # phrase arc: starts a bit low and climbs over the first ~1.5 s (centred, so the
+        # voice stays as deep as the Deepness setting on average)
+        climb = self.phrase * self.phrase_target * (min(1.0, self.speaking_time / 1.5) - 0.5)
         # end-of-phrase: quick swoop up then crash down below the starting pitch
         e = self.ending
         swoop = self.phrase * (1.2 * math.sin(math.pi * min(1.0, e * 1.6)) - 1.6 * e) if e > 0 else 0.0
@@ -265,12 +455,13 @@ class LiltEngine:
         self.lfo_phase = (self.lfo_phase + self.lfo_rate * dt) % 1.0
         gate = 1.0 if voiced else 0.3
 
-        target = self.base + climb + swoop + self.stress_level + self.swing * gate * lfo
-        # glide from the previous value to avoid zipper noise
-        ramp = np.linspace(0.0, 1.0, n, endpoint=True)
-        curve = self.last_value + (target - self.last_value) * np.minimum(1.0, ramp * 2.0)
-        self.last_value = float(curve[-1])
-        self.stress_level *= math.exp(-dt / 0.14)
+        # real voices glide between notes over tens of milliseconds - never jump
+        target = self.base + climb + swoop + self.stress_level
+        a = 1.0 - math.exp(-dt / 0.07)
+        new_value = self.last_value + (target - self.last_value) * a
+        curve = np.linspace(self.last_value, new_value, n + 1)[1:] + self.swing * gate * lfo
+        self.last_value = new_value
+        self.stress_level *= math.exp(-dt / 0.18)
         return curve
 
 
@@ -376,13 +567,14 @@ class Limiter:
 class VoiceChain:
     """Mic in -> Jamaican man out. All parameters can be changed while running."""
 
-    def __init__(self, sr: int, base_pitch: float = -2.5, lilt: float = 1.0, warmth_db: float = 4.0,
-                 rasp: float = 0.25, echo: bool = False, gain_db: float = 0.0, formant: float = -1.5,
-                 quality: str = "hq", seed: int | None = None):
+    def __init__(self, sr: int, base_pitch: float = -2.5, lilt: float = 1.0, warmth_db: float = 3.0,
+                 rasp: float = 0.1, echo: bool = False, gain_db: float = 0.0, formant: float = -1.5,
+                 quality: str = "natural", seed: int | None = None):
         self.sr = sr
-        # "hq" = phase vocoder with formant control (~45 ms), "fast" = delay line (~20 ms)
+        # "natural" = PSOLA (~40 ms, sounds human), "pv" = phase vocoder (~45 ms, smoother but robotic),
+        # "fast" = delay line (~20 ms). Older settings files say "hq", which now means natural.
         self.quality = quality
-        self.shifter = SpectralShifter(sr, formant_semitones=formant) if quality == "hq" else PitchShifter(sr)
+        self.shifter = self._make_shifter(quality, formant)
         self.lilt_engine = LiltEngine(sr, base=base_pitch, seed=seed)
         self.echo = DubEcho(sr)
         self.echo_on = echo
@@ -394,18 +586,36 @@ class VoiceChain:
         self.set_warmth(warmth_db)
         self.bypass = False
 
+    def _make_shifter(self, quality: str, formant: float):
+        if quality == "pv":
+            return SpectralShifter(self.sr, formant_semitones=formant)
+        if quality == "fast":
+            return PitchShifter(self.sr)
+        return PsolaShifter(self.sr, formant_semitones=formant)
+
+    def set_quality(self, quality: str, formant: float = -1.5):
+        """Swap the pitch engine live: natural (PSOLA), pv (phase vocoder) or fast (delay line)."""
+        self.quality = quality
+        self.shifter = self._make_shifter(quality, formant)
+
     def set_lilt(self, amount: float):
-        """0 = no sing-song, 1 = authentic, 2 = cartoonishly musical."""
+        """0 = no sing-song, 1 = authentic, 2 = cartoonishly musical.
+
+        The lilt follows *your* speech (phrase arcs, lifts on stressed syllables, falls at the
+        end). Only the cartoon end of the range adds a little syllable-rate wobble, because
+        constant wobble is what makes a voice changer sound fake.
+        """
         amount = max(0.0, float(amount))
         self.lilt_amount = amount
         e = self.lilt_engine
-        e.swing, e.stress, e.phrase = 1.6 * amount, 2.8 * amount, 2.2 * amount
+        e.swing = 0.6 * max(0.0, amount - 1.2)
+        e.stress, e.phrase = 1.8 * amount, 1.4 * amount
 
     def set_base_pitch(self, semitones: float):
         self.lilt_engine.base = float(semitones)
 
     def set_formant(self, semitones: float):
-        if isinstance(self.shifter, SpectralShifter):
+        if isinstance(self.shifter, (SpectralShifter, PsolaShifter)):
             self.shifter.formant_semitones = float(semitones)
 
     def set_warmth(self, db: float):

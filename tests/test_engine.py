@@ -93,3 +93,22 @@ def test_typed_say_goes_through_translator():
     eng._perform_text("Thank you so much")
     patois = next(p for k, p in events if k == "patois")
     assert "tank yuh" in patois.patois.lower()
+
+
+def test_jitter_buffer_primes_fades_and_grows():
+    from bombovoice.engine import Fifo
+
+    f = Fifo(10000, prefill=512, max_prefill=2048)
+    f.push(np.ones(256, dtype=np.float32))
+    assert not np.any(f.pull(256))  # still filling the cushion
+    f.push(np.ones(1024, dtype=np.float32))
+    assert np.all(f.pull(256) == 1.0)
+    for _ in range(3):  # starve it repeatedly
+        f.pull(4096)
+        f.push(np.ones(2048, dtype=np.float32))
+        f.pull(256)
+    assert f.underflows >= 3 and f.prefill > 512  # cushion grew after repeated dropouts
+    f2 = Fifo(10000, prefill=0)
+    f2.push(np.ones(100, dtype=np.float32))
+    out = f2.pull(256)
+    assert out[0] == 1.0 and out[99] < 0.05 and not np.any(out[100:])  # clean fade, no click

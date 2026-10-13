@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import queue
 import random
+import sys
 import threading
 import time
 from typing import Callable
@@ -26,25 +27,58 @@ EventFn = Callable[[str, object], None]
 
 
 class Fifo:
-    """Thread-safe float32 FIFO that never lets latency pile up."""
+    """Thread-safe jitter buffer between the mic callback and the output callback.
 
-    def __init__(self, max_samples: int):
+    The two sound devices never tick in perfect lock-step, so the output keeps a small
+    cushion (`prefill`) of audio. If the cushion ever runs dry it fades out cleanly and
+    re-fills (one tiny gap instead of constant crackle), and if dropouts keep happening
+    it grows the cushion a little. If audio piles up, it trims back so latency can't creep.
+    """
+
+    def __init__(self, max_samples: int, prefill: int = 0, max_prefill: int | None = None):
         self.buf = np.zeros(0, dtype=np.float32)
         self.max = max_samples
+        self.prefill = prefill
+        self.max_prefill = max_prefill or prefill * 3
+        self.primed = prefill == 0
         self.lock = threading.Lock()
+        self.underflows = 0
+        self.overflows = 0
+        self._recent: list[float] = []
 
     def push(self, x: np.ndarray):
         with self.lock:
             self.buf = np.concatenate([self.buf, x.astype(np.float32)])
             if len(self.buf) > self.max:
-                self.buf = self.buf[-self.max:]
+                keep = max(self.prefill * 2, len(x))
+                self.buf = self.buf[-keep:]
+                self.overflows += 1
 
     def pull(self, n: int) -> np.ndarray:
         with self.lock:
-            out, self.buf = self.buf[:n], self.buf[n:]
-        if len(out) < n:
-            out = np.concatenate([out, np.zeros(n - len(out), dtype=np.float32)])
-        return out
+            if not self.primed:
+                if len(self.buf) < self.prefill + n:
+                    return np.zeros(n, dtype=np.float32)
+                self.primed = True
+            if len(self.buf) >= n:
+                out, self.buf = self.buf[:n], self.buf[n:]
+                return out
+            # ran dry: fade out what we have, then rebuild the cushion
+            out = np.zeros(n, dtype=np.float32)
+            have = self.buf
+            if len(have):
+                fade = np.linspace(1.0, 0.0, len(have), dtype=np.float32) if len(have) < 64 else np.concatenate(
+                    [np.ones(len(have) - 64, dtype=np.float32), np.linspace(1.0, 0.0, 64, dtype=np.float32)])
+                out[:len(have)] = have * fade
+            self.buf = np.zeros(0, dtype=np.float32)
+            self.underflows += 1
+            self.primed = self.prefill == 0
+            now = time.monotonic()
+            self._recent = [t for t in self._recent if now - t < 10.0] + [now]
+            if len(self._recent) >= 3 and self.prefill and self.prefill < self.max_prefill:
+                self.prefill = min(self.max_prefill, self.prefill + max(64, self.prefill // 2))
+                self._recent = []
+            return out
 
 
 class Mixer:
@@ -112,8 +146,9 @@ class Engine:
                                 formant=self.s.formant, quality=self.s.quality)
         self.mixer = Mixer(self.sr)
         self.mixer.loop_gain = self.s.riddim_volume
-        self.out_fifo = Fifo(self.sr // 4)
-        self.monitor_fifo = Fifo(self.sr // 4)
+        bs = int(self.s.block_size)
+        self.out_fifo = Fifo(self.sr // 5, prefill=2 * bs, max_prefill=8 * bs)
+        self.monitor_fifo = Fifo(self.sr // 5, prefill=2 * bs, max_prefill=8 * bs)
         self.history = np.zeros(self.sr * 4, dtype=np.float32)  # last 4 s of voice, for the rewind
         self.muted = False
         self.voice_level = 0.0
@@ -159,13 +194,13 @@ class Engine:
     def _load_ai(self):
         from .ai import describe, translator_from_settings
         from .stt import UtteranceDetector
-        from .tts import make_tts
+        from .tts import make_tts_process
 
         self._detector = UtteranceDetector(self.sr)
         self._translator = translator_from_settings(self.s)
         self.status(f"Translator: {describe(self._translator)}")
         try:
-            self._tts = make_tts(self.s.tts_backend, self.s.tts_voice, self.sr)
+            self._tts = make_tts_process(self.s.tts_backend, self.s.tts_voice, self.sr)
             self.status(f"Voice synth: {self._tts.name}")
         except Exception as exc:
             self.status(f"Text-to-speech unavailable: {exc}")
@@ -205,9 +240,11 @@ class Engine:
         if self._tts is None:
             return
         lines = AD_LIBS + (SPICY_AD_LIBS if self.s.spicy else [])
+        time.sleep(3.0)  # let the audio settle first
         for line in lines:
             if line in self.adlibs:
                 continue
+            time.sleep(0.15)  # background work politely - the live voice comes first
             try:  # primary voice only - never cache the robotic fallback voice
                 self.adlibs[line] = self._tts.say(line, **self._voice_kw())
             except Exception as exc:
@@ -222,10 +259,10 @@ class Engine:
         if self._tts is None or self._tts.name != "edge" or self.s.tts_backend != "auto":
             return None
         if self._tts_backup is None:
-            from .tts import make_tts
+            from .tts import make_tts_process
 
             try:
-                self._tts_backup = make_tts("pyttsx3", None, self.sr)
+                self._tts_backup = make_tts_process("pyttsx3", None, self.sr)
             except Exception:
                 return None
         return self._tts_backup
@@ -290,6 +327,7 @@ class Engine:
 
         if not self.sounds:
             self.prepare()
+        sys.setswitchinterval(0.001)  # let the audio callbacks grab the GIL quickly
         in_dev = find_device(self.s.input_device, "input")
         out_dev = find_device(self.s.output_device, "output") if self.s.output_device else find_virtual_output()
         pulse_sink = None
@@ -365,6 +403,9 @@ class Engine:
     def close(self):
         self.stop()
         self.jobs.put(("quit", None))
+        for tts in (self._tts, self._tts_backup):
+            if hasattr(tts, "close"):
+                tts.close()
 
     # ------------------------------------------------------------------ worker
     def _worker(self):
@@ -498,6 +539,8 @@ class Engine:
             c.set_warmth(self.s.warmth_db)
         if "formant" in changes:
             c.set_formant(self.s.formant)
+        if "quality" in changes:
+            c.set_quality(self.s.quality, self.s.formant)
         if "rasp" in changes:
             c.rasp = float(self.s.rasp)
         if "echo" in changes:

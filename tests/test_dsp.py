@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from bombovoice.dsp import DubEcho, Limiter, PitchShifter, SpectralShifter, VoiceChain
+from bombovoice.dsp import DubEcho, Limiter, PitchShifter, PsolaShifter, SpectralShifter, VoiceChain
 
 SR = 48000
 
@@ -73,3 +73,32 @@ def test_echo_and_limiter():
     assert np.max(np.abs(y[d - 50:d + 400])) > 0.05  # first repeat arrives
     lim = Limiter(SR, ceiling_db=-1.0)
     assert np.max(np.abs(lim.process(np.ones(512) * 3.0))) <= 1.0
+
+
+def test_psola_hits_target_pitch_and_keeps_length():
+    t = np.arange(SR * 2) / SR
+    x = 0.2 * sum((1 / k) * np.sin(2 * np.pi * 120 * k * t) for k in range(1, 20))
+    for st in (-3, 4):
+        sh = PsolaShifter(SR, formant_semitones=0)
+        y = _run(sh, x, st)
+        assert len(y) == len(x) and np.isfinite(y).all()
+        seg = y[SR:]
+        spec = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
+        f = np.fft.rfftfreq(len(seg), 1 / SR)
+        band = (f > 40) & (f < 400)
+        assert abs(f[band][np.argmax(spec[band])] - 120 * 2 ** (st / 12)) < 2.0
+
+
+def test_psola_passes_silence_and_noise_cleanly():
+    rng = np.random.default_rng(0)
+    x = np.concatenate([np.zeros(SR // 2), 0.05 * rng.normal(size=SR // 2)])
+    y = _run(PsolaShifter(SR, formant_semitones=-1.5), x, -2.5)
+    assert np.isfinite(y).all() and np.max(np.abs(y[: SR // 2 - 4000])) < 1e-6
+    assert np.std(y[-SR // 4:]) > 0.01  # breath/consonant noise still comes through
+
+
+def test_default_chain_uses_natural_engine_without_wobble():
+    chain = VoiceChain(SR)
+    assert isinstance(chain.shifter, PsolaShifter)
+    assert chain.lilt_engine.swing == 0.0
+    assert isinstance(VoiceChain(SR, quality="hq").shifter, PsolaShifter)  # old settings files

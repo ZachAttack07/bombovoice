@@ -222,3 +222,66 @@ def make_tts(backend: str = "auto", voice: str | None = None, sample_rate: int =
             errors.append(f"{name}: {exc}")
     raise TTSError("No text-to-speech backend available (" + "; ".join(errors) + "). "
                    "Install one with: pip install edge-tts   or   pip install pyttsx3")
+
+
+# ---------------------------------------------------------------------------
+# Out-of-process rendering
+# ---------------------------------------------------------------------------
+# Speech synthesis + PSOLA are heavy and hold Python's GIL; done in a thread they
+# starve the real-time audio callbacks and the live voice crackles. So the engine
+# renders speech in a separate worker process instead.
+
+_worker_tts: BaseTTS | None = None
+
+
+def _worker_init(backend: str, voice: str | None, sample_rate: int):
+    global _worker_tts
+    logging.basicConfig(level=logging.WARNING)
+    _worker_tts = make_tts(backend, voice, sample_rate)
+
+
+def _worker_name() -> str:
+    return _worker_tts.name
+
+
+def _worker_job(kind: str, payload, kwargs: dict) -> np.ndarray:
+    if kind == "perform":
+        return _worker_tts.perform(payload, **kwargs)
+    return _worker_tts.say(payload, **kwargs)
+
+
+class TTSProcess:
+    """Same interface as a TTS backend (name / perform / say) but runs in its own process."""
+
+    def __init__(self, backend: str = "auto", voice: str | None = None, sample_rate: int = 48000,
+                 timeout: float = 120.0):
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        self.sr = sample_rate
+        self.timeout = timeout
+        self._pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                                         initializer=_worker_init, initargs=(backend, voice, sample_rate))
+        try:
+            self.name = self._pool.submit(_worker_name).result(timeout=90)
+        except Exception as exc:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            raise TTSError(f"could not start the speech worker: {exc}") from exc
+
+    def perform(self, translation, **kwargs) -> np.ndarray:
+        return self._pool.submit(_worker_job, "perform", translation, kwargs).result(timeout=self.timeout)
+
+    def say(self, text: str, **kwargs) -> np.ndarray:
+        return self._pool.submit(_worker_job, "say", text, kwargs).result(timeout=self.timeout)
+
+    def close(self):
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+def make_tts_process(backend: str = "auto", voice: str | None = None, sample_rate: int = 48000):
+    """Speech in a worker process when possible (keeps the live voice glitch-free)."""
+    try:
+        return TTSProcess(backend, voice, sample_rate)
+    except TTSError as exc:
+        log.info("speech worker unavailable (%s); rendering in-process", exc)
+        return make_tts(backend, voice, sample_rate)

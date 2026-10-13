@@ -20,6 +20,12 @@ SOUNDBOARD = [
     ("RIDDIM", "riddim"), ("AD-LIB", "adlib"), ("DUB ECHO", "echo"), ("PEW PEW", "laser"),
 ]
 
+ENGINES = {
+    "natural": "Natural (PSOLA) - recommended",
+    "pv": "Smooth (phase vocoder)",
+    "fast": "Low latency (delay line)",
+}
+
 SLIDERS = [
     # key, label, from, to, resolution
     ("base_pitch", "Deepness (semitones)", -8.0, 4.0, 0.5),
@@ -153,7 +159,14 @@ class App:
         vc = ttk.LabelFrame(left, text="Voice")
         vc.pack(fill="x")
         self.slider_labels = {}
-        for i, (key, label, lo, hi, res) in enumerate(SLIDERS):
+        ttk.Label(vc, text="Voice engine").grid(row=0, column=0, sticky="w", padx=6)
+        q = self.s.quality if self.s.quality in ENGINES else "natural"
+        self.engine_var = tk.StringVar(value=ENGINES[q])
+        eb = ttk.Combobox(vc, textvariable=self.engine_var, state="readonly", width=26, values=list(ENGINES.values()))
+        eb.grid(row=0, column=1, columnspan=2, sticky="w", padx=6, pady=2)
+        eb.bind("<<ComboboxSelected>>", lambda e: self._set(
+            quality={v: k for k, v in ENGINES.items()}[self.engine_var.get()]))
+        for i, (key, label, lo, hi, res) in enumerate(SLIDERS, start=1):
             ttk.Label(vc, text=label).grid(row=i, column=0, sticky="w", padx=6)
             lbl = ttk.Label(vc, text=f"{getattr(self.s, key):.2f}", width=6)
             lbl.grid(row=i, column=2)

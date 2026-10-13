@@ -32,6 +32,11 @@ DEFAULT_HOTKEYS = {
 }
 
 
+SETTINGS_VERSION = 2
+# voice settings whose meaning/defaults changed in v2 (natural PSOLA engine) - reset once on upgrade
+_RESET_ON_UPGRADE = {2: {"rasp", "warmth_db", "quality"}}
+
+
 def config_path() -> Path:
     if os.name == "nt":
         base = Path(os.environ.get("APPDATA", Path.home()))
@@ -58,10 +63,10 @@ class Settings:
     base_pitch: float = -2.5  # semitones; negative = deeper
     formant: float = -1.5  # semitones; negative = bigger chest / bigger man
     lilt: float = 1.0  # sing-song amount: 0 off, 1 authentic, 2 cartoon
-    warmth_db: float = 4.0
-    rasp: float = 0.25
+    warmth_db: float = 3.0
+    rasp: float = 0.1
     echo: bool = False
-    quality: str = "hq"  # "hq" phase vocoder (~45 ms) or "fast" delay line (~20 ms)
+    quality: str = "natural"  # "natural" PSOLA (~40 ms), "pv" phase vocoder, "fast" delay line (~20 ms)
     mic_gain_db: float = 0.0
 
     # AI
@@ -87,6 +92,7 @@ class Settings:
     auto_adlib_seconds: float = 25.0
 
     hotkeys: dict = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
+    settings_version: int = SETTINGS_VERSION
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
@@ -95,6 +101,12 @@ class Settings:
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
+                old_version = int(data.get("settings_version", 1))
+                for version, keys in _RESET_ON_UPGRADE.items():
+                    if old_version < version:
+                        for k in keys:
+                            data.pop(k, None)
+                data["settings_version"] = SETTINGS_VERSION
                 names = {f.name for f in fields(cls)}
                 for k, v in data.items():
                     if k in names:

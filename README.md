@@ -20,7 +20,7 @@ yaadie  : "Yow bredrin, wah gwaan? Mi a go fi play some games wid mi bredren dem
 
 | Mode | What happens | Latency |
 |---|---|---|
-| **Live voice** | Your own voice, deeper with a bigger chest (separate pitch and formant control), run through the **Lilt Engine**. The Lilt Engine follows your speech and bends the pitch the way Jamaican English moves: sing-song swing at syllable rate, upward jumps on stressed syllables, a climb through each phrase, and a swoop up and crash down when you stop. Optional gravel/rasp and warmth. | ~45 ms (HQ) / ~20 ms (fast) |
+| **Live voice** | Your own voice, deeper with a bigger chest, through a real-time **PSOLA** pitch engine. PSOLA finds your pitch, cuts your voice into grains one vocal-cord cycle long and re-spaces them, so it sounds like a person rather than a robot. Pitch and formants (chest size) are set separately. The **Lilt Engine** follows your speech: phrases start low and climb, stressed syllables lift and glide, and phrase ends fall. There's no constant wobble. Optional gravel/rasp and warmth. You can switch engines live in the GUI (Natural / Smooth / Low latency). | ~40 ms |
 | **AI Patois** | Speech-to-text (local Whisper), then **Claude rewrites what you said in Patois** and plans the delivery (which words to punch, where the pitch rises or falls, comic-timing pauses), then a TTS voice performs that plan line by line. | 2–4 s |
 | **Hybrid** | Live Jamaican voice, plus an **AI hype man** who jumps in after your sentences: *"Bwoy! Him seh im a go win dis game!"* | live + async |
 
@@ -157,11 +157,17 @@ If you see `Online voice failed (...)`, that line was spoken by Windows' built-i
 That usually means no internet, or an outdated `edge-tts`. `run_windows.bat` updates packages on every launch,
 so restarting it often fixes this. If it keeps happening, send the full error message from the log.
 
+**Live voice sounds robotic**
+Make sure *Voice engine* is **Natural (PSOLA)**. For the most realistic result:
+- Keep **Deepness** between −1.5 and −3.5 and **Big-man chest** between −1 and −2.5. Bigger shifts always sound more processed.
+- Keep **Sing-song lilt** at 1.0 or lower. Above about 1.2 it adds deliberate cartoon wobble.
+- Speak in the rhythm yourself (it helps a lot): stretch the vowels, stress the end of the phrase, and drop the pitch at the end.
+
 ## How it works
 
 ```
 mic ─► VoiceChain ──────────────────────────────┐
-       (HPF → Lilt Engine → phase-vocoder pitch  │
+       (HPF → Lilt Engine → PSOLA pitch  │
         + formant shift → EQ → rasp → dub echo   ├─► Mixer ─► limiter ─► virtual cable ─► Discord/game
         → limiter)                               │   (+ riddim w/ ducking, soundboard, TTS, ad-libs)
 mic ─► VAD ─► Whisper ─► Claude (Haiku 5.5 via OpenRouter) ─► TTS performer (per-segment rate/pitch/volume + contours) ┘
@@ -169,7 +175,7 @@ mic ─► VAD ─► Whisper ─► Claude (Haiku 5.5 via OpenRouter) ─► TT
 
 | File | Role |
 |---|---|
-| `bombovoice/dsp.py` | Phase-vocoder pitch/formant shifter, delay-line shifter, **Lilt Engine**, dub echo, EQ, limiter |
+| `bombovoice/dsp.py` | Real-time PSOLA pitch/formant shifter (plus phase-vocoder and delay-line alternatives), **Lilt Engine**, dub echo, EQ, limiter |
 | `bombovoice/patois.py` | Offline English → Patois translator plus prosody segmentation |
 | `bombovoice/ai.py` | Claude director via OpenRouter or the Anthropic API (structured output: Patois text plus delivery plan) |
 | `bombovoice/tts.py` | Edge / pyttsx3 TTS that performs the delivery plan |
