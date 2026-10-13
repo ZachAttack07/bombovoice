@@ -148,6 +148,37 @@ a Jamaican speaker, every line comes out with a real Jamaican accent, not an app
 
 **Best combo:** Live AI voice for talking, cloned voice for typed punchlines and AI mode, plus the riddim and air horn.
 
+## Getting Jamaican voice training data (the legit way)
+
+To train your own Jamaican **RVC** voice, or to get a clip for **XTTS** cloning, use speech from people who
+agreed to it. Bombovoice includes a tool that filters it down to only the Jamaican voices and cleans it for training.
+
+| Source | What you get | Licence |
+|---|---|---|
+| **[Mozilla Common Voice](https://commonvoice.mozilla.org)**, English release via [Mozilla Data Collective](https://datacollective.mozillafoundation.org) (free account) | Thousands of speakers, each tagged with their self-described accent. Jamaican/Caribbean ones can be filtered out. | **CC0**: contributors put their voices in the public domain |
+| **[Speech Accent Archive](https://accent.gmu.edu/language/jamaican-creole-english/)** | 4 Jamaican Creole English speakers, about 30 s each. Too short for RVC, but ideal as **XTTS clips**. | CC BY-NC-SA 4.0 (non-commercial, credit GMU) |
+| **[IDEA Dialects Archive](https://www.dialectsarchive.com/jamaica-11)** | Many Jamaica recordings | Listening is free; reusing the files needs **written permission** (director@dialectsarchive.com) |
+| **A Jamaican friend or a hired voice actor** | The best quality: 10–20 min of clean speech | Get their OK to train an AI voice (in writing, for an actor) |
+
+Don't rip YouTube, TikTok or songs: those voices belong to real people who didn't agree, and the audio is copyrighted.
+
+```bash
+# 1. Download + extract the Common Voice ENGLISH release (it has validated.tsv and clips/)
+# 2. See who's there:
+bombovoice dataset scan "D:/cv-corpus-26.0/en"              # Jamaican accents only
+bombovoice dataset scan "D:/cv-corpus-26.0/en" --caribbean  # wider Caribbean net
+# 3. Build a training set from the speaker with the most clean audio (or --speaker ID, or --mix to blend):
+bombovoice dataset commonvoice "D:/cv-corpus-26.0/en" -o jamaican_voice --gender male --set-clone
+# Your own recordings of a consenting speaker (long files are sliced at pauses):
+bombovoice dataset recordings "D:/recordings/friend" -o friend_voice --set-clone
+```
+
+The tool keeps only matching accents and drops down-voted, noisy or distorted clips. It trims silence,
+evens out loudness and writes 40 kHz WAVs to `dataset/`. It also creates a 20-second `xtts_reference.wav`
+(`--set-clone` makes it your cloned-voice clip) and a `SOURCES.txt` crediting every clip.
+Then train with [Applio](https://github.com/IAHispano/Applio) (point it at `dataset/`; RVC v2, 40k, RMVPE, 200–400 epochs)
+and load the `.pth` in Bombovoice.
+
 ## Command line
 
 ```bash
@@ -163,6 +194,7 @@ bombovoice file -m ai my_clip.wav my_clip_patois.wav                # full AI re
 bombovoice demo -o demo.wav                                         # 3 lines over the riddim
 bombovoice devices                                                  # list audio devices
 bombovoice devices --test                                           # check which devices actually open
+bombovoice dataset scan <common-voice-en-folder>                    # find Jamaican-accent speakers
 ```
 
 In `live` mode you can type commands: `airhorn`, `siren`, `rewind`, `riddim`, `adlib`, `echo`,

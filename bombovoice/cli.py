@@ -238,6 +238,41 @@ def cmd_gpu_check(a, s: Settings):
             print(f"  {what}: missing ({exc.__class__.__name__}) - re-run setup_gpu.bat")
 
 
+def cmd_dataset(a, s: Settings):
+    from . import dataset as ds
+
+    pattern = ds.CARIBBEAN if getattr(a, "caribbean", False) else ds.JAMAICAN
+    if a.dcmd == "scan":
+        reports = ds.scan_common_voice(a.folder, pattern)
+        if not reports:
+            print("No matching speakers found. Try --caribbean.")
+            return
+        print(f"{'speaker':<14} {'minutes':>7} {'clips':>5}  gender      accent")
+        for r in reports:
+            print(f"{r.speaker[:12]:<14} {r.seconds / 60:7.1f} {len(r.clips):5d}  {r.gender[:10]:<10}  {r.accent}")
+        total = sum(r.seconds for r in reports) / 60
+        print(f"\n{len(reports)} speakers, {total:.1f} minutes. RVC wants ONE speaker with 10+ minutes; "
+              "use --mix to blend several if nobody has enough.")
+        return
+    if a.dcmd == "commonvoice":
+        summary = ds.from_common_voice(a.folder, a.out, pattern, speaker=a.speaker, mix_speakers=a.mix,
+                                       gender=a.gender, sr=a.sr)
+    else:
+        summary = ds.prepare_recordings(a.folder, a.out, sr=a.sr)
+    print(f"Kept {summary['clips']} clips = {summary['minutes']:.1f} minutes  ->  {summary['dataset_dir']}")
+    if summary["rejected"]:
+        print(f"Rejected {summary['rejected']}: {summary['reject_reasons']}")
+    if summary["minutes"] < 10:
+        print("Heads up: under 10 minutes. RVC still trains, but more clean audio = a better voice.")
+    print(f"Voice-cloning reference: {summary['xtts_reference']}")
+    print("Next: train an RVC model on the dataset folder with Applio (https://github.com/IAHispano/Applio),")
+    print("      then load the .pth in Bombovoice's 'AI voice (GPU)' panel.")
+    if a.set_clone:
+        s.voice_clip = summary["xtts_reference"]
+        s.save()
+        print("Saved the reference as your cloned-voice clip.")
+
+
 def cmd_setup(a, s: Settings):
     from .devices import create_linux_virtual_mic, setup_instructions
 
@@ -367,6 +402,26 @@ def build_parser() -> argparse.ArgumentParser:
     dv = sub.add_parser("devices", help="list audio devices")
     dv.add_argument("--test", action="store_true", help="try opening every device and report which work")
     dv.set_defaults(fn=cmd_devices)
+
+    ds = sub.add_parser("dataset", help="build Jamaican voice-training data from consented, open speech")
+    dsub = ds.add_subparsers(dest="dcmd", required=True)
+    sc = dsub.add_parser("scan", help="list Jamaican-accent speakers in a Common Voice English release")
+    sc.add_argument("folder", help="extracted Common Voice English folder (has validated.tsv + clips/)")
+    sc.add_argument("--caribbean", action="store_true", help="include other Caribbean accents")
+    cv = dsub.add_parser("commonvoice", help="build a training set from Common Voice (CC0)")
+    cv.add_argument("folder")
+    cv.add_argument("-o", "--out", default="jamaican_voice_data")
+    cv.add_argument("--caribbean", action="store_true", help="include other Caribbean accents")
+    cv.add_argument("--speaker", help="speaker id prefix from 'dataset scan' (default: the one with most audio)")
+    cv.add_argument("--mix", action="store_true", help="blend all matching speakers into one voice")
+    cv.add_argument("--gender", help="only speakers whose gender field contains this (e.g. male)")
+    rc = dsub.add_parser("recordings", help="clean + slice your own recordings (with the speaker's permission)")
+    rc.add_argument("folder")
+    rc.add_argument("-o", "--out", default="jamaican_voice_data")
+    for p_ in (cv, rc):
+        p_.add_argument("--sr", type=int, default=40000, help="sample rate of the output (RVC v2: 40000 or 48000)")
+        p_.add_argument("--set-clone", action="store_true", help="use the 20 s reference as your cloned-voice clip")
+    ds.set_defaults(fn=cmd_dataset)
 
     gc = sub.add_parser("gpu-check", help="check the GPU for the AI voice and voice cloning")
     gc.set_defaults(fn=cmd_gpu_check)
